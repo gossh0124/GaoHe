@@ -1,21 +1,21 @@
 # GaoHe Windows Local CI Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (\`- [ ]\`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Establish a small, installable GaoHe Python baseline that runs natively on Windows and is automatically tested by GitHub Actions, without adding CD or a local LLM.
 
-**Architecture:** Keep the local runtime thin: a Python package exposes a \`gaohe\` CLI, environment parsing is isolated in \`config.py\`, and a standard-library status page proves the local process can serve HTTP. The Gemini provider remains a later product-layer concern and is represented only by safe configuration fields in this plan. CI installs the package on one Windows runner and runs deterministic pytest tests without API secrets.
+**Architecture:** Keep the local runtime thin: a Python package exposes a `gaohe` CLI, environment parsing is isolated in `config.py`, and a standard-library status page proves the local process can serve HTTP. The Gemini provider remains a later product-layer concern and is represented only by safe configuration fields in this plan. CI installs the package on one Windows runner and runs deterministic pytest tests without API secrets.
 
-**Tech Stack:** Python 3.11+, \`setuptools\`, \`argparse\`, \`dataclasses\`, \`pathlib\`, \`http.server\`, \`pytest\`, GitHub Actions.
+**Tech Stack:** Python 3.11+, `setuptools`, `argparse`, `dataclasses`, `pathlib`, `http.server`, `pytest`, GitHub Actions.
 
-**Spec:** \`docs/superpowers/specs/2026-09-14-gaohe-windows-local-ci-design.md\`
+**Spec:** `docs/superpowers/specs/2026-09-14-gaohe-windows-local-ci-design.md`
 
 ## Global Constraints
 
 - Windows 原生 PowerShell 是本機執行環境；不加入 WSL、Docker 或雲端 worker。
-- 遠端 LLM 維持 BYOK Gemini；預設 \`gemini-2.5-flash-lite\` 與 \`SEARCH_PROVIDER=none\`。
-- 金鑰只存在 \`.env\` 或使用者設定的 secret；不得進 Git 或測試輸出。
-- CI 使用單一 \`windows-latest\` runner 與 Python 3.11，不呼叫真實 API。
+- 遠端 LLM 維持 BYOK Gemini；預設 `gemini-2.5-flash-lite` 與 `SEARCH_PROVIDER=none`。
+- 金鑰只存在 `.env` 或使用者設定的 secret；不得進 Git 或測試輸出。
+- CI 使用單一 `windows-latest` runner 與 Python 3.11，不呼叫真實 API。
 - CD 暫緩；不建立部署平台、部署 secret 或自動部署 job。
 - 目前沒有可恢復的既有遠端 GaoHe 程式碼；新增程式須視為依規格建立的新基線。
 - v0／v1／v2 的新聞分析功能不在本計畫內；status UI 不是 v2 同題對讀 UI。
@@ -27,16 +27,17 @@
 ### Task 1: 建立可安裝 Python package 與 CLI 版本命令
 
 **Files:**
-- Create: \`pyproject.toml\`
-- Create: \`src/gaohe/__init__.py\`
-- Create: \`src/gaohe/cli.py\`
-- Test: \`tests/test_cli.py\`
+- Create: `pyproject.toml`
+- Create: `src/gaohe/__init__.py`
+- Create: `src/gaohe/__main__.py`
+- Create: `src/gaohe/cli.py`
+- Test: `tests/test_cli.py`
 
 **Interfaces:**
-- Produces \`gaohe.__version__: str = "0.1.0"\`.
-- Produces \`gaohe.cli.main(argv: Sequence[str] | None = None) -> int\`.
-- \`main(["--version"])\` prints \`gaohe 0.1.0\` and returns \`0\`.
-- The installed console script is \`gaohe\`.
+- Produces `gaohe.__version__: str = "0.1.0"`.
+- Produces `gaohe.cli.main(argv: Sequence[str] | None = None) -> int`.
+- `main(["--version"])` prints `gaohe 0.1.0` and returns `0`.
+- The installed console script is `gaohe`.
 
 - [ ] **Step 1: Write the failing CLI test**
 
@@ -57,17 +58,26 @@ Run from the worktree:
 py -3.11 -m pytest tests/test_cli.py::test_version_command_prints_package_version -q
 ```
 
-Expected: FAIL because the \`gaohe\` package does not exist yet. If collection fails for a different reason, correct the test setup and rerun until the missing-package failure is observed.
+Expected: FAIL because the `gaohe` package does not exist yet. If collection fails for a different reason, correct the test setup and rerun until the missing-package failure is observed.
 
 - [ ] **Step 3: Add the minimal package and entry point**
 
-Create \`src/gaohe/__init__.py\`:
+Create `src/gaohe/__init__.py`:
 
 ```
 __version__ = "0.1.0"
 ```
 
-Create \`src/gaohe/cli.py\`:
+Create `src/gaohe/__main__.py`:
+
+```
+from .cli import main
+
+
+raise SystemExit(main())
+```
+
+Create `src/gaohe/cli.py`:
 
 ```
 from collections.abc import Sequence
@@ -87,7 +97,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 ```
 
-Create \`pyproject.toml\`:
+Create `pyproject.toml`:
 
 ```
 [build-system]
@@ -109,6 +119,9 @@ gaohe = "gaohe.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
 ```
 
 - [ ] **Step 4: Run the focused test and the installed console script**
@@ -119,7 +132,7 @@ py -3.11 -m pytest tests/test_cli.py::test_version_command_prints_package_versio
 gaohe --version
 ```
 
-Expected: the focused test passes, the command prints \`gaohe 0.1.0\`, and all commands exit with code \`0\`.
+Expected: the focused test passes, the command prints `gaohe 0.1.0`, and all commands exit with code `0`.
 
 - [ ] **Step 5: Commit the package baseline**
 
@@ -128,18 +141,18 @@ git add pyproject.toml src/gaohe tests/test_cli.py
 git commit -m "chore: bootstrap Python package"
 ```
 
-### Task 2: Add safe Windows environment loading and \`doctor\`
+### Task 2: Add safe Windows environment loading and `doctor`
 
 **Files:**
-- Create: \`src/gaohe/config.py\`
-- Modify: \`src/gaohe/cli.py\`
-- Test: \`tests/test_config.py\`
+- Create: `src/gaohe/config.py`
+- Modify: `src/gaohe/cli.py`
+- Test: `tests/test_config.py`
 
 **Interfaces:**
-- Produces \`gaohe.config.Settings\` with fields \`llm_provider\`, \`gemini_model\`, \`search_provider\`, \`data_dir\`, and a non-repr \`google_api_key\`.
-- Produces \`gaohe.config.load_settings(env_file: Path | None = None, environ: Mapping[str, str] | None = None) -> Settings\`.
-- \`load_settings\` reads simple \`KEY=VALUE\` lines, never overrides an explicitly supplied environment value, and ignores blank/comment lines.
-- \`main(["doctor", "--env-file", path])\` prints only safe configuration summaries and never prints the API key.
+- Produces `gaohe.config.Settings` with fields `llm_provider`, `gemini_model`, `search_provider`, `data_dir`, and a non-repr `google_api_key`.
+- Produces `gaohe.config.load_settings(env_file: Path | None = None, environ: Mapping[str, str] | None = None) -> Settings`.
+- `load_settings` reads simple `KEY=VALUE` lines, never overrides an explicitly supplied environment value, and ignores blank/comment lines.
+- `main(["doctor", "--env-file", path])` prints only safe configuration summaries and never prints the API key.
 
 - [ ] **Step 1: Write failing configuration tests**
 
@@ -181,15 +194,15 @@ def test_explicit_environment_wins_and_key_is_not_repr(tmp_path: Path):
 py -3.11 -m pytest tests/test_config.py -q
 ```
 
-Expected: FAIL during collection because \`gaohe.config\` does not exist. Fix only test setup errors if present, then rerun until the missing-module failure is observed.
+Expected: FAIL during collection because `gaohe.config` does not exist. Fix only test setup errors if present, then rerun until the missing-module failure is observed.
 
 - [ ] **Step 3: Implement the minimal settings loader**
 
-Create \`src/gaohe/config.py\` with a frozen dataclass, \`repr=False\` on the key field, defaults matching the free-test decision, and a parser that accepts only the simple \`.env\` syntax used by \`.env.example\`. Use \`Path\` for \`data_dir\`, defaulting to \`Path("data")\`. When \`environ\` is supplied, copy it before merging file values so caller-owned mappings are not mutated. Apply explicit environment values after file values.
+Create `src/gaohe/config.py` with a frozen dataclass, `repr=False` on the key field, defaults matching the free-test decision, and a parser that accepts only the simple `.env` syntax used by `.env.example`. Use `Path` for `data_dir`, defaulting to `Path("data")`. When `environ` is supplied, copy it before merging file values so caller-owned mappings are not mutated. Apply explicit environment values after file values.
 
-- [ ] **Step 4: Add the \`doctor\` command without exposing secrets**
+- [ ] **Step 4: Add the `doctor` command without exposing secrets**
 
-Extend \`cli.py\` with an \`argparse\` parser and a \`doctor\` subcommand accepting \`--env-file\` (default \`.env\`). Print exactly these safe fields: \`llm_provider\`, \`gemini_model\`, \`search_provider\`, \`data_dir\`, and \`google_api_key=present|missing\`. Return \`0\` for a readable or absent \`.env\`; actual API-key validation belongs to the future provider call.
+Extend `cli.py` with an `argparse` parser and a `doctor` subcommand accepting `--env-file` (default `.env`). Print exactly these safe fields: `llm_provider`, `gemini_model`, `search_provider`, `data_dir`, and `google_api_key=present|missing`. Return `0` for a readable or absent `.env`; actual API-key validation belongs to the future provider call.
 
 - [ ] **Step 5: Run configuration and CLI verification**
 
@@ -198,7 +211,7 @@ py -3.11 -m pytest tests/test_config.py tests/test_cli.py -q
 gaohe doctor --env-file .env.example
 ```
 
-Expected: all focused tests pass; the doctor output contains \`gemini-2.5-flash-lite\`, \`search_provider=none\`, and \`google_api_key=missing\`, with no secret value.
+Expected: all focused tests pass; the doctor output contains `gemini-2.5-flash-lite`, `search_provider=none`, and `google_api_key=missing`, with no secret value.
 
 - [ ] **Step 6: Commit the configuration contract**
 
@@ -210,14 +223,14 @@ git commit -m "feat: add safe runtime configuration"
 ### Task 3: Add a local-only status UI
 
 **Files:**
-- Create: \`src/gaohe/web.py\`
-- Modify: \`src/gaohe/cli.py\`
-- Test: \`tests/test_web.py\`
+- Create: `src/gaohe/web.py`
+- Modify: `src/gaohe/cli.py`
+- Test: `tests/test_web.py`
 
 **Interfaces:**
-- Produces \`gaohe.web.render_status_page(settings: Settings) -> str\`.
-- Produces \`gaohe.web.serve(host: str = "127.0.0.1", port: int = 8000, env_file: Path = Path(".env")) -> None\`.
-- \`serve\` uses only \`http.server\`, binds to loopback by default, and serves the status page at \`/\`.
+- Produces `gaohe.web.render_status_page(settings: Settings) -> str`.
+- Produces `gaohe.web.serve(host: str = "127.0.0.1", port: int = 8000, env_file: Path = Path(".env")) -> None`.
+- `serve` uses only `http.server`, binds to loopback by default, and serves the status page at `/`.
 - The page identifies the local runtime and displays safe configuration only; it is not the v2 media comparison UI.
 
 - [ ] **Step 1: Write the failing page-rendering test**
@@ -251,15 +264,15 @@ def test_status_page_contains_safe_runtime_state_without_key():
 py -3.11 -m pytest tests/test_web.py -q
 ```
 
-Expected: FAIL during collection because \`gaohe.web\` does not exist.
+Expected: FAIL during collection because `gaohe.web` does not exist.
 
 - [ ] **Step 3: Implement the standard-library status page and server**
 
-Use \`html.escape\` for displayed values. Implement a \`BaseHTTPRequestHandler\` that returns status \`200\`, \`Content-Type: text/html; charset=utf-8\`, and the rendered page for \`/\`; return \`404\` for other paths. Construct \`ThreadingHTTPServer((host, port), handler)\` and call \`serve_forever()\` until the process receives the normal keyboard interrupt. Do not add a web framework.
+Use `html.escape` for displayed values. Implement a `BaseHTTPRequestHandler` that returns status `200`, `Content-Type: text/html; charset=utf-8`, and the rendered page for `/`; return `404` for other paths. Construct `ThreadingHTTPServer((host, port), handler)` and call `serve_forever()` until the process receives the normal keyboard interrupt. Do not add a web framework.
 
-- [ ] **Step 4: Add and verify \`gaohe serve\`**
+- [ ] **Step 4: Add and verify `gaohe serve`**
 
-Extend the CLI with \`serve --host\`, \`--port\`, and \`--env-file\`, passing parsed values to \`serve\`.
+Extend the CLI with `serve --host`, `--port`, and `--env-file`, passing parsed values to `serve`.
 
 ```
 py -3.11 -m pytest tests/test_web.py tests/test_config.py tests/test_cli.py -q
@@ -277,13 +290,13 @@ git commit -m "feat: add local status page"
 ### Task 4: Add Windows setup documentation and repository guardrails
 
 **Files:**
-- Create: \`.gitignore\`
-- Create: \`.env.example\`
-- Create: \`README.md\`
+- Create: `.gitignore`
+- Create: `.env.example`
+- Create: `README.md`
 
 - [ ] **Step 1: Add the repository ignore rules**
 
-\`.gitignore\` must include:
+`.gitignore` must include:
 
 ```
 .env
@@ -302,7 +315,7 @@ reports/
 
 - [ ] **Step 2: Add the safe environment template**
 
-\`.env.example\` must contain names and free-test defaults only:
+`.env.example` must contain names and free-test defaults only:
 
 ```
 LLM_PROVIDER=gemini
@@ -314,7 +327,7 @@ DATA_DIR=data
 
 - [ ] **Step 3: Document the Windows workflow and project boundary**
 
-\`README.md\` must document, in Traditional Chinese, the project positioning as post-publication media verification rather than an official rumor-truth service; BYOK and user-paid API costs; Windows PowerShell setup; \`gaohe --version\`, \`gaohe doctor\`, and \`gaohe serve\`; the free-test defaults; the fact that CI does not call real APIs; the fact that the current code is a new baseline because the earlier remote source was unavailable; and that CD is not configured.
+`README.md` must document, in Traditional Chinese, the project positioning as post-publication media verification rather than an official rumor-truth service; BYOK and user-paid API costs; Windows PowerShell setup; `gaohe --version`, `gaohe doctor`, and `gaohe serve`; the free-test defaults; the fact that CI does not call real APIs; the fact that the current code is a new baseline because the earlier remote source was unavailable; and that CD is not configured.
 
 - [ ] **Step 4: Verify repository hygiene**
 
@@ -323,7 +336,7 @@ git diff --check
 git check-ignore -q .env .venv .worktrees data reports
 ```
 
-Expected: both commands exit \`0\`; no secret-like value appears in tracked files.
+Expected: both commands exit `0`; no secret-like value appears in tracked files.
 
 - [ ] **Step 5: Commit repository documentation and guardrails**
 
@@ -335,16 +348,16 @@ git commit -m "docs: document Windows setup and repository rules"
 ### Task 5: Add GitHub Actions CI
 
 **Files:**
-- Create: \`.github/workflows/ci.yml\`
+- Create: `.github/workflows/ci.yml`
 
 **Interfaces:**
-- Every branch push and every pull request targeting \`main\` runs the \`test\` job.
-- The job uses \`windows-latest\`, Python \`3.11\`, project dev extras, and \`python -m pytest -q\`.
-- The workflow has \`contents: read\` permission and no API secret.
+- Every branch push and every pull request targeting `main` runs the `test` job.
+- The job uses `windows-latest`, Python `3.11`, project dev extras, and `python -m pytest -q`.
+- The workflow has `contents: read` permission and no API secret.
 
 - [ ] **Step 1: Add the minimal workflow**
 
-Create \`.github/workflows/ci.yml\`:
+Create `.github/workflows/ci.yml`:
 
 ```
 name: CI
@@ -397,14 +410,14 @@ git commit -m "ci: run Python tests on Windows"
 
 - [ ] **Step 1: Create the isolated execution worktree**
 
-From the clean planning checkout, confirm \`.worktrees/\` is ignored, then create the feature worktree and branch:
+From the clean planning checkout, confirm `.worktrees/` is ignored, then create the feature worktree and branch:
 
 ```
 git check-ignore -q .worktrees
 git worktree add '.worktrees\\gaohe-windows-ci' -b 'codex/gaohe-windows-ci' main
 ```
 
-Run all remaining commands from \`C:\\Users\\berhe\\Documents\\ChatGPT\\GaoHe\\.worktrees\\gaohe-windows-ci\`.
+Run all remaining commands from `C:\\Users\\berhe\\Documents\\ChatGPT\\GaoHe\\.worktrees\\gaohe-windows-ci`.
 
 - [ ] **Step 2: Recreate the local environment from scratch**
 
@@ -416,11 +429,11 @@ py -3.11 -m venv .venv
 & .\\.venv\\Scripts\\python.exe -m gaohe doctor --env-file .env.example
 ```
 
-Expected: install exits \`0\`, the full suite passes, version output is \`gaohe 0.1.0\`, doctor shows the free-test defaults and \`google_api_key=missing\` without exposing a value.
+Expected: install exits `0`, the full suite passes, version output is `gaohe 0.1.0`, doctor shows the free-test defaults and `google_api_key=missing` without exposing a value.
 
 - [ ] **Step 3: Exercise the local HTTP path**
 
-Start the server using \`Start-Process -WindowStyle Hidden\`, save the returned process id, request \`http://127.0.0.1:8765/\` with \`Invoke-WebRequest\`, assert status \`200\` and the \`GaoHe local runtime\` marker, then stop only that saved process id. Record the response status and body marker in the handoff; do not leave a server process running.
+Start the server using `Start-Process -WindowStyle Hidden`, save the returned process id, request `http://127.0.0.1:8765/` with `Invoke-WebRequest`, assert status `200` and the `GaoHe local runtime` marker, then stop only that saved process id. Record the response status and body marker in the handoff; do not leave a server process running.
 
 - [ ] **Step 4: Run final local hygiene checks**
 
