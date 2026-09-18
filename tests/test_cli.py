@@ -26,6 +26,9 @@ def test_doctor_reports_safe_provider_neutral_readiness(tmp_path, capsys):
     assert "llm_api_key=present" in output
     assert "firecrawl_api_key=present" in output
     assert "missing_setup=none" in output
+    assert "data_dir=" not in output
+    assert "database_path=" not in output
+    assert "poll_interval_minutes=" not in output
     assert "super-secret" not in output
     assert "firecrawl-secret" not in output
     assert "GOOGLE_API_KEY" not in output

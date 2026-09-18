@@ -67,9 +67,12 @@ def load_settings(
     merged.update(dict(os.environ if environ is None else environ))
 
     def value(name: str, default: str, legacy_name: str | None = None) -> str:
-        candidate = merged.get(name, "").strip()
-        if not candidate and legacy_name:
+        if name in merged:
+            candidate = merged[name].strip()
+        elif legacy_name:
             candidate = merged.get(legacy_name, "").strip()
+        else:
+            candidate = ""
         return candidate or default
 
     interval_value = value("POLL_INTERVAL_MINUTES", "60")

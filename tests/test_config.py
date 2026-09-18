@@ -68,6 +68,24 @@ def test_legacy_local_environment_migrates_when_generic_names_are_absent(tmp_pat
     assert settings.llm_api_key == "legacy-secret"
 
 
+def test_explicit_empty_generic_settings_do_not_fall_back_to_legacy(tmp_path: Path):
+    settings = load_settings(
+        tmp_path / ".env",
+        {
+            "LLM_MODEL": "",
+            "LLM_API_KEY": "",
+            "WEB_SEARCH_PROVIDER": "",
+            "GEMINI_MODEL": "legacy-model",
+            "GOOGLE_API_KEY": "legacy-secret",
+            "SEARCH_PROVIDER": "legacy-search",
+        },
+    )
+
+    assert settings.llm_model == ""
+    assert settings.llm_api_key == ""
+    assert settings.web_search_provider == "none"
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "often"])
 def test_invalid_poll_interval_raises_clear_error(tmp_path: Path, value: str):
     with pytest.raises(ValueError, match="POLL_INTERVAL_MINUTES must be a positive integer"):
