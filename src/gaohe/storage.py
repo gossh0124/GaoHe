@@ -9,7 +9,8 @@ from typing import Iterator
 from .domain import FetchedArticle, RunSummary, Source, article_content_hash
 
 
-_SENSITIVE_HEADER = re.compile(r"(?im)\b(?:authorization|cookie|set-cookie|x-(?:api-key|token|secret|session))\s*:\s*[^\r\n]*")
+_SENSITIVE_HEADER = re.compile(r"(?im)^[^\r\n:]*?(?:authorization|cookie|token|secret|password|session|api[-_]key)[^\r\n:]*:\s*[^\r\n]*")
+_SENSITIVE_QUERY = re.compile(r"(?i)([?&][^=&#\s]*(?:authorization|cookie|token|secret|password|session|api[-_]key)[^=&#\s]*=)[^&#\s]*")
 _SENSITIVE_VALUE = re.compile(r"(?i)\b(?:api[_-]?key|(?:access|refresh|client)[_-]?(?:token|secret)|token|secret|password|passwd|pwd|session(?:[_-]?id)?)\s*=\s*[^\s,;&]+")
 _BEARER_TOKEN = re.compile(r"(?i)bearer\s+[^\s,;]+")
 
@@ -25,6 +26,7 @@ def _safe_error(error: str | None) -> str | None:
     if error is None:
         return None
     redacted = _SENSITIVE_HEADER.sub("[redacted]", error)
+    redacted = _SENSITIVE_QUERY.sub(r"\1[redacted]", redacted)
     redacted = _SENSITIVE_VALUE.sub(lambda match: match.group(0).split("=", 1)[0] + "=[redacted]", redacted)
     return _BEARER_TOKEN.sub("Bearer [redacted]", redacted)[:500]
 

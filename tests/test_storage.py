@@ -176,3 +176,26 @@ def test_source_check_errors_redact_cookie_token_and_query_secrets(tmp_path: Pat
     assert all(value not in errors[0] for value in ["private-cookie", "private-token", "query-token", "query-secret", "query-password", "session="])
     assert "kind=article" in errors[0]
     assert errors[1] == "Connection timed out after 5 seconds"
+
+
+def test_source_check_errors_redact_generic_sensitive_headers_and_query_keys(tmp_path: Path):
+    store = Store(tmp_path / "monitoring.db")
+    store.initialize()
+    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
+
+    store.record_source_check(
+        source_id,
+        "2026-09-18T06:00:00Z",
+        "failed",
+        0,
+        "Token: private-token\nSecret: private-secret\nPassword: private-password\nSession: private-session\n"
+        "GET https://example.test/feed?authorization=private-auth&cookie=private-cookie&kind=article",
+    )
+
+    with sqlite3.connect(tmp_path / "monitoring.db") as connection:
+        error = connection.execute("SELECT error FROM source_checks").fetchone()[0]
+
+    assert all(value not in error for value in ["private-token", "private-secret", "private-password", "private-session", "private-auth", "private-cookie"])
+    assert "authorization=[redacted]" in error
+    assert "cookie=[redacted]" in error
+    assert "kind=article" in error
