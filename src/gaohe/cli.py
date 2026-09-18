@@ -28,11 +28,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "doctor":
         settings = load_settings(args.env_file)
-        print(f"llm_provider={settings.llm_provider}")
-        print(f"gemini_model={settings.gemini_model}")
-        print(f"search_provider={settings.search_provider}")
-        print(f"data_dir={settings.data_dir}")
-        print(f"google_api_key={'present' if settings.has_api_key else 'missing'}")
+        missing_setup = settings.validate()
+        print(f"llm_provider={settings.llm_provider or 'unset'}")
+        print(f"web_search_provider={settings.web_search_provider}")
+        print(f"llm_model={'configured' if settings.llm_model else 'missing'}")
+        print(f"llm_api_key={'present' if settings.has_llm_key else 'missing'}")
+        print(f"firecrawl_api_key={'present' if settings.has_firecrawl_key else 'missing'}")
+        print(f"data_dir={'configured' if settings.data_dir else 'missing'}")
+        print(f"database_path={'configured' if settings.database_path else 'missing'}")
+        print(f"poll_interval_minutes={settings.poll_interval_minutes}")
+        print(
+            "missing_setup="
+            + (",".join(item.split(" is required", 1)[0] for item in missing_setup) or "none")
+        )
         return 0
     if args.command == "serve":
         serve(host=args.host, port=args.port, env_file=args.env_file)

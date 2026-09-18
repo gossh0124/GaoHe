@@ -10,10 +10,10 @@ def render_status_page(settings: Settings) -> str:
         f"<tr><th>{escape(label)}</th><td>{escape(value)}</td></tr>"
         for label, value in (
             ("LLM provider", settings.llm_provider),
-            ("Gemini model", settings.gemini_model),
-            ("Search provider", settings.search_provider),
+            ("LLM model", settings.llm_model),
+            ("Web search provider", settings.web_search_provider),
             ("Data directory", str(settings.data_dir)),
-            ("API key", "present" if settings.has_api_key else "missing"),
+            ("LLM API key", "present" if settings.has_llm_key else "missing"),
         )
     )
     return (
