@@ -1,6 +1,6 @@
 # 稿核 GaoHe
 
-稿核是台灣向、免費、BYOK（使用者自備 API Key）的媒體複驗工具，針對已發布的媒體報導拆解可驗證主張、對照證據與標記可觀察的語言特徵。
+稿核是本機優先的媒體「稿後複驗」工具。它不替整篇文章產生單一真假結論，也不是官方闢謠平台。
 
 它不是官方闢謠平台，也不對 LINE／社群謠言作公共真假判決，不替整篇文章產生單一「官方真理」結論，不對用詞作道德裁決，也不掛政府背書。
 
@@ -8,7 +8,7 @@
 
 這個 repo 是依專案規格建立的新基線。先前提到的外部 `berhen5888/GaoHe` repo 與功能分支目前無法取得，因此本次內容不宣稱恢復了既有實作。
 
-目前提供 Windows 原生執行基礎：版本命令、安全設定檢查與本機 status page。v0 的文章分析、v1 的來源擷取／同題聚類，以及 v2 的同題多媒體對讀仍需獨立的產品實作與驗收。
+目前提供 Windows 原生的監測基礎：來源清單、RSS／列表／sitemap 探索、文章 metadata 與內容版本的本機 SQLite 紀錄、一次性監測命令及本機 status page。AI 分析、搜尋／Firecrawl、證據對照、標註、同題分組、使用者介面與排程尚未實作。
 
 ## Windows 原生安裝
 
@@ -20,25 +20,33 @@ py -3.11 -m venv .venv
 Copy-Item .env.example .env
 ```
 
-編輯 `.env`，填入自己的 `GOOGLE_API_KEY`。目前免費測試預設為：
+目前的來源監測不會呼叫 AI 或搜尋服務；可先保留 provider 設定空白。日後若加入需要 AI 的功能，再設定 provider-neutral 的 `LLM_PROVIDER`、`LLM_MODEL` 與 `LLM_API_KEY`：
 
 ```dotenv
-LLM_PROVIDER=gemini
-GEMINI_MODEL=gemini-2.5-flash-lite
-SEARCH_PROVIDER=none
+LLM_PROVIDER=
+LLM_MODEL=
+LLM_API_KEY=
+WEB_SEARCH_PROVIDER=none
 ```
 
-API 費用、免費額度與 429 限流由使用者自行承擔；本專案不提供 API 額度，也不把金鑰送進 Git。
+金鑰不會寫入 SQLite，也不應提交到 Git。
 
 ## 本機命令
 
 ```powershell
 & .\.venv\Scripts\python.exe -m gaohe --version
 & .\.venv\Scripts\python.exe -m gaohe doctor --env-file .env
+& .\.venv\Scripts\python.exe -m gaohe source add --name "Example News" --feed-url "https://example.test/feed.xml" --env-file .env
+& .\.venv\Scripts\python.exe -m gaohe source list --env-file .env
+& .\.venv\Scripts\python.exe -m gaohe watch --once --env-file .env
 & .\.venv\Scripts\python.exe -m gaohe serve --port 8000
 ```
 
-`doctor` 只顯示 provider、model、搜尋設定、資料目錄與金鑰是否存在，不會顯示金鑰內容。`serve` 預設只綁定 `127.0.0.1`，目前是確認本機 runtime 的 status page，不是 v2 對讀介面。
+可選擇 `--article-url` 設定新聞列表網址；用 `source disable --id ID` 暫停、`source enable --id ID` 恢復來源。`doctor` 與本機 status page 只顯示金鑰是否存在，不會顯示內容。`serve` 預設只綁定 `127.0.0.1`；開啟後以瀏覽器前往 `http://127.0.0.1:8000/` 檢查本機 runtime。
+
+## 監測契約
+
+監測採 metadata-first：先記錄來源出現的文章 metadata，再在內容變更時建立新的文章 revision。抓取失敗只會留下來源／抓取失敗紀錄，不代表文章有問題，更不是事實判定。來源、文章 metadata、內容版本與檢查結果預設都只留在本機資料目錄的 SQLite 資料庫。
 
 ## 測試與 CI
 
@@ -48,7 +56,7 @@ API 費用、免費額度與 429 限流由使用者自行承擔；本專案不�
 & .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-GitHub Actions 使用 `windows-latest` 與 Python 3.11，在每次 push／PR 執行安裝與 pytest。CI 使用 deterministic tests，不呼叫 Gemini、Brave 或 Tavily，也不需要 API secret；CI 綠燈不等於新聞事實判斷正確。
+GitHub Actions 使用 `windows-latest` 與 Python 3.11，在每次 push／PR 執行安裝與 pytest。CI 使用 deterministic tests，不呼叫外部 provider 或搜尋服務，也不需要 API secret；CI 綠燈不等於新聞事實判斷正確。
 
 ## CD
 

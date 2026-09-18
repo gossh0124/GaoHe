@@ -146,6 +146,11 @@ class Store:
                 query += " WHERE enabled = 1"
             return [Source(row[0], row[1], row[2], row[3], bool(row[4])) for row in connection.execute(query)]
 
+    def set_source_enabled(self, source_id: int, enabled: bool) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute("UPDATE sources SET enabled = ? WHERE id = ?", (int(enabled), source_id))
+            return cursor.rowcount == 1
+
     def save_fetched_article(self, article: FetchedArticle) -> tuple[int, bool]:
         expected_hash = article_content_hash(article.candidate.title, article.text)
         if article.content_hash != expected_hash:

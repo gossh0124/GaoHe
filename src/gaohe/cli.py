@@ -2,9 +2,12 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 import sqlite3
+import sys
+from urllib.parse import urlsplit
 
 from . import __version__
-from .config import load_settings
+from .config import Settings, load_settings
+from .domain import Source
 from .monitor import watch_once
 from .sources import UrllibTransport
 from .storage import Store
@@ -24,7 +27,31 @@ def build_parser() -> argparse.ArgumentParser:
     watch = commands.add_parser("watch")
     watch.add_argument("--once", action="store_true", required=True)
     watch.add_argument("--env-file", type=Path, default=Path(".env"))
+    source = commands.add_parser("source")
+    source_commands = source.add_subparsers(dest="source_command", required=True)
+    add = source_commands.add_parser("add")
+    add.add_argument("--name", required=True)
+    add.add_argument("--feed-url", required=True)
+    add.add_argument("--article-url")
+    add.add_argument("--env-file", type=Path, default=Path(".env"))
+    listing = source_commands.add_parser("list")
+    listing.add_argument("--env-file", type=Path, default=Path(".env"))
+    for action in ("disable", "enable"):
+        toggle = source_commands.add_parser(action)
+        toggle.add_argument("--id", type=int, required=True)
+        toggle.add_argument("--env-file", type=Path, default=Path(".env"))
     return parser
+
+
+def _store(settings: Settings) -> Store:
+    store = Store(settings.database_path)
+    store.initialize()
+    return store
+
+
+def _is_http_url(value: str) -> bool:
+    parsed = urlsplit(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -52,8 +79,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "watch":
         try:
             settings = load_settings(args.env_file)
-            store = Store(settings.database_path)
-            store.initialize()
+            store = _store(settings)
         except (OSError, ValueError, sqlite3.Error):
             return 2
         summary = watch_once(settings, store, UrllibTransport())
@@ -61,6 +87,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"checked={summary.sources_checked} candidates={summary.candidates_seen} "
             f"revisions={summary.revisions_created} failures={summary.failures}"
         )
+        return 0
+    if args.command == "source":
+        if args.source_command == "add":
+            if not args.name.strip():
+                print("error: --name must not be empty", file=sys.stderr)
+                return 2
+            for option, value in (("--feed-url", args.feed_url), ("--article-url", args.article_url)):
+                if value is not None and not _is_http_url(value):
+                    print(f"error: {option} must be an HTTP(S) URL", file=sys.stderr)
+                    return 2
+        try:
+            store = _store(load_settings(args.env_file))
+        except (OSError, ValueError, sqlite3.Error):
+            return 2
+        if args.source_command == "add":
+            source_id = store.add_source(Source(None, args.name.strip(), args.feed_url, args.article_url))
+            print(f"added source id={source_id}")
+            return 0
+        if args.source_command == "list":
+            for source in store.list_sources():
+                print(
+                    f"id={source.id} enabled={'yes' if source.enabled else 'no'} name={source.name} "
+                    f"feed_url={source.feed_url} article_url={source.article_url or '-'}"
+                )
+            return 0
+        enabled = args.source_command == "enable"
+        if not store.set_source_enabled(args.id, enabled):
+            print(f"error: source id={args.id} was not found", file=sys.stderr)
+            return 2
+        print(f"{'enabled' if enabled else 'disabled'} source id={args.id}")
         return 0
     parser.print_help()
     return 0
