@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 import sqlite3
 
@@ -72,6 +73,20 @@ def test_unchanged_fetched_article_reuses_its_current_revision(tmp_path: Path):
 
     assert duplicate_id == first_id
     assert created is False
+
+
+def test_unchanged_content_updates_article_metadata_without_a_revision(tmp_path: Path):
+    store = Store(tmp_path / "monitoring.db")
+    store.initialize()
+    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
+    item = candidate(source_id)
+
+    first_id, _ = store.save_fetched_article(fetched(item))
+    duplicate_id, created = store.save_fetched_article(fetched(replace(item, metadata={"marker": "v2"})))
+
+    assert duplicate_id == first_id
+    assert created is False
+    assert store.latest_article_metadata(item.url) == {"marker": "v2"}
 
 
 def test_changed_fetched_article_creates_a_new_revision(tmp_path: Path):

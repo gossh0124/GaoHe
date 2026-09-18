@@ -130,7 +130,38 @@ def test_unchanged_sitemap_lastmod_skips_the_known_article_body_fetch(tmp_path):
     assert transport.calls.count("https://example.test/story") == 1
 
 
-def test_unchanged_feed_etag_skips_the_known_article_body_fetch(tmp_path):
+def test_unchanged_candidate_article_etag_skips_the_known_article_body_fetch(tmp_path, monkeypatch):
+    import gaohe.monitor as monitor_module
+
+    store = make_store(tmp_path)
+    store.add_source(Source(None, "Feed", "https://example.test/feed"))
+    candidate = monitor_module.ArticleCandidate(
+        0,
+        "https://example.test/story",
+        "Story",
+        "2026-09-18T10:00:00Z",
+        "2026-09-18T12:00:00Z",
+        {"article_etag": "article-v1"},
+    )
+    monkeypatch.setattr(monitor_module, "_candidates", lambda *_args: [candidate])
+    transport = FakeTransport(
+        {
+            "https://example.test/feed": HttpResponse(
+                200,
+                "https://example.test/feed",
+                {"Content-Type": "application/rss+xml"},
+                rss(),
+            ),
+            "https://example.test/story": response("https://example.test/story", b"<main><p>Body</p></main>"),
+        }
+    )
+
+    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
+    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 0
+    assert transport.calls.count("https://example.test/story") == 1
+
+
+def test_unchanged_feed_etag_does_not_skip_a_changed_article_body(tmp_path):
     store = make_store(tmp_path)
     store.add_source(Source(None, "Feed", "https://example.test/feed"))
     transport = FakeTransport(
@@ -141,13 +172,51 @@ def test_unchanged_feed_etag_skips_the_known_article_body_fetch(tmp_path):
                 {"Content-Type": "application/rss+xml", "ETag": "feed-v1"},
                 rss(),
             ),
-            "https://example.test/story": response("https://example.test/story", b"<main><p>Body</p></main>"),
+            "https://example.test/story": response("https://example.test/story", b"<main><p>A</p></main>"),
         }
     )
 
     assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
+    transport.responses["https://example.test/story"] = response(
+        "https://example.test/story", b"<main><p>B</p></main>"
+    )
+    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
+    assert transport.calls.count("https://example.test/story") == 2
+
+
+def test_changed_candidate_marker_with_same_content_is_persisted_without_a_revision(tmp_path, monkeypatch):
+    import gaohe.monitor as monitor_module
+
+    store = make_store(tmp_path)
+    store.add_source(Source(None, "Feed", "https://example.test/feed"))
+    marker = {"value": "article-v1"}
+
+    def candidates(*_args):
+        return [
+            monitor_module.ArticleCandidate(
+                0,
+                "https://example.test/story",
+                "Story",
+                "2026-09-18T10:00:00Z",
+                "2026-09-18T12:00:00Z",
+                {"article_etag": marker["value"]},
+            )
+        ]
+
+    monkeypatch.setattr(monitor_module, "_candidates", candidates)
+    transport = FakeTransport(
+        {
+            "https://example.test/feed": response("https://example.test/feed", rss(), "application/rss+xml"),
+            "https://example.test/story": response("https://example.test/story", b"<main><p>Same</p></main>"),
+        }
+    )
+
+    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
+    marker["value"] = "article-v2"
     assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 0
-    assert transport.calls.count("https://example.test/story") == 1
+    assert store.latest_article_metadata("https://example.test/story")["_article_marker"] == "article_etag:article-v2"
+    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 0
+    assert transport.calls.count("https://example.test/story") == 2
 
 
 def test_changed_then_reverted_article_creates_each_current_state_transition(tmp_path):

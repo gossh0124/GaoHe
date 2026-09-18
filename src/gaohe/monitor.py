@@ -21,12 +21,13 @@ def _candidates(body: bytes, source_url: str, content_type: str) -> list[Article
     return parse_html_list(body, source_url)
 
 
-def _marker(candidate: ArticleCandidate, source_etag: str | None) -> str | None:
-    if source_etag:
-        return f"etag:{source_etag}"
+def _marker(candidate: ArticleCandidate) -> str | None:
+    article_etag = candidate.metadata.get("article_etag")
+    if article_etag:
+        return f"article_etag:{article_etag}"
     if candidate.metadata.get("discovery_type") == "sitemap" and candidate.published_at:
         return f"lastmod:{candidate.published_at}"
-    return candidate.metadata.get("etag")
+    return None
 
 
 def _stored_candidate(candidate: ArticleCandidate, source_id: int, marker: str | None) -> ArticleCandidate:
@@ -40,7 +41,7 @@ def _stored_candidate(candidate: ArticleCandidate, source_id: int, marker: str |
             published_at = None
     metadata = dict(candidate.metadata)
     if marker:
-        metadata["_monitor_marker"] = marker
+        metadata["_article_marker"] = marker
     return replace(candidate, source_id=source_id, published_at=published_at, metadata=metadata)
 
 
@@ -69,12 +70,11 @@ def watch_once(
                 raise ValueError("source feed could not be parsed")
             seen = len(candidates)
             candidates_seen += seen
-            source_etag = next((value for name, value in feed.headers.items() if name.lower() == "etag"), None)
             for candidate in candidates:
-                marker = _marker(candidate, source_etag)
+                marker = _marker(candidate)
                 known_hash = store.latest_content_hash(candidate.url)
                 metadata = store.latest_article_metadata(candidate.url) if known_hash and marker else None
-                if metadata and metadata.get("_monitor_marker") == marker:
+                if metadata and metadata.get("_article_marker") == marker:
                     continue
                 candidate = _stored_candidate(candidate, source.id, marker)
                 try:
@@ -86,6 +86,8 @@ def watch_once(
                         raise ValueError("article text could not be extracted")
                     content_hash = article_content_hash(candidate.title, text)
                     if known_hash == content_hash:
+                        if marker:
+                            store.save_fetched_article(FetchedArticle(candidate, text, started_at, content_hash))
                         continue
                     _, created = store.save_fetched_article(
                         FetchedArticle(candidate, text, started_at, content_hash)
