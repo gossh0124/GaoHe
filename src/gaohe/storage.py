@@ -9,7 +9,9 @@ from typing import Iterator
 from .domain import FetchedArticle, RunSummary, Source, article_content_hash
 
 
-_SECRET_ERROR_PART = re.compile(r"(?i)(authorization|x-api-key|api[_-]?key)\s*[:=][^\r\n]*|bearer\s+[^\s,;]+")
+_SENSITIVE_HEADER = re.compile(r"(?im)\b(?:authorization|cookie|set-cookie|x-(?:api-key|token|secret|session))\s*:\s*[^\r\n]*")
+_SENSITIVE_VALUE = re.compile(r"(?i)\b(?:api[_-]?key|(?:access|refresh|client)[_-]?(?:token|secret)|token|secret|password|passwd|pwd|session(?:[_-]?id)?)\s*=\s*[^\s,;&]+")
+_BEARER_TOKEN = re.compile(r"(?i)bearer\s+[^\s,;]+")
 
 
 def _utc_iso(value: str) -> str:
@@ -22,7 +24,9 @@ def _utc_iso(value: str) -> str:
 def _safe_error(error: str | None) -> str | None:
     if error is None:
         return None
-    return _SECRET_ERROR_PART.sub("[redacted]", error)[:500]
+    redacted = _SENSITIVE_HEADER.sub("[redacted]", error)
+    redacted = _SENSITIVE_VALUE.sub(lambda match: match.group(0).split("=", 1)[0] + "=[redacted]", redacted)
+    return _BEARER_TOKEN.sub("Bearer [redacted]", redacted)[:500]
 
 
 class Store:
@@ -69,7 +73,8 @@ class Store:
                     title TEXT NOT NULL,
                     published_at TEXT,
                     discovered_at TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL
+                    metadata_json TEXT NOT NULL,
+                    current_revision_id INTEGER REFERENCES article_revisions(id)
                 );
                 CREATE TABLE IF NOT EXISTS article_revisions (
                     id INTEGER PRIMARY KEY,
@@ -77,8 +82,7 @@ class Store:
                     text TEXT NOT NULL,
                     fetched_at TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
-                    fetch_status TEXT NOT NULL,
-                    UNIQUE(article_id, content_hash)
+                    fetch_status TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS runs (
                     id INTEGER PRIMARY KEY,
@@ -91,6 +95,37 @@ class Store:
                 );
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(articles)")}
+            if "current_revision_id" not in columns:
+                self._migrate_revisions(connection)
+                connection.execute("ALTER TABLE articles ADD COLUMN current_revision_id INTEGER REFERENCES article_revisions(id)")
+                connection.execute(
+                    """UPDATE articles SET current_revision_id = (
+                       SELECT id FROM article_revisions
+                       WHERE article_id = articles.id ORDER BY id DESC LIMIT 1)"""
+                )
+
+    @staticmethod
+    def _migrate_revisions(connection: sqlite3.Connection) -> None:
+        indexes = list(connection.execute("PRAGMA index_list(article_revisions)"))
+        if not any(index[2] for index in indexes):
+            return
+        connection.executescript(
+            """
+            ALTER TABLE article_revisions RENAME TO article_revisions_legacy;
+            CREATE TABLE article_revisions (
+                id INTEGER PRIMARY KEY,
+                article_id INTEGER NOT NULL REFERENCES articles(id),
+                text TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                fetch_status TEXT NOT NULL
+            );
+            INSERT INTO article_revisions (id, article_id, text, fetched_at, content_hash, fetch_status)
+            SELECT id, article_id, text, fetched_at, content_hash, fetch_status FROM article_revisions_legacy;
+            DROP TABLE article_revisions_legacy;
+            """
+        )
 
     def add_source(self, source: Source) -> int:
         with self._connection() as connection:
@@ -124,17 +159,21 @@ class Store:
                 (candidate.source_id, candidate.url, candidate.title, _utc_iso(candidate.published_at) if candidate.published_at else None,
                  _utc_iso(candidate.discovered_at), json.dumps(candidate.metadata, sort_keys=True, ensure_ascii=False)),
             )
-            article_id = connection.execute("SELECT id FROM articles WHERE url = ?", (candidate.url,)).fetchone()[0]
-            existing = connection.execute(
-                "SELECT id FROM article_revisions WHERE article_id = ? AND content_hash = ?", (article_id, article.content_hash)
+            article_id, current_revision_id = connection.execute(
+                "SELECT id, current_revision_id FROM articles WHERE url = ?", (candidate.url,)
             ).fetchone()
-            if existing:
-                return existing[0], False
+            if current_revision_id is not None:
+                current_hash = connection.execute(
+                    "SELECT content_hash FROM article_revisions WHERE id = ?", (current_revision_id,)
+                ).fetchone()[0]
+                if current_hash == article.content_hash:
+                    return current_revision_id, False
             cursor = connection.execute(
                 """INSERT INTO article_revisions (article_id, text, fetched_at, content_hash, fetch_status)
                    VALUES (?, ?, ?, ?, ?)""",
                 (article_id, article.text, _utc_iso(article.fetched_at), article.content_hash, article.fetch_status),
             )
+            connection.execute("UPDATE articles SET current_revision_id = ? WHERE id = ?", (cursor.lastrowid, article_id))
             return cursor.lastrowid, True
 
     def record_source_check(self, source_id: int, checked_at: str, status: str, candidates_seen: int, error: str | None) -> None:
@@ -157,9 +196,9 @@ class Store:
     def latest_content_hash(self, url: str) -> str | None:
         with self._connection() as connection:
             row = connection.execute(
-                """SELECT revisions.content_hash FROM article_revisions AS revisions
-                   JOIN articles ON articles.id = revisions.article_id
-                   WHERE articles.url = ? ORDER BY revisions.id DESC LIMIT 1""",
+                """SELECT revisions.content_hash FROM articles
+                   JOIN article_revisions AS revisions ON revisions.id = articles.current_revision_id
+                   WHERE articles.url = ?""",
                 (url,),
             ).fetchone()
             return row[0] if row else None

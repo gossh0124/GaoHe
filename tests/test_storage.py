@@ -88,6 +88,31 @@ def test_changed_fetched_article_creates_a_new_revision(tmp_path: Path):
     assert store.latest_content_hash(item.url) == article_content_hash(item.title, "Changed body")
 
 
+def test_reverted_content_creates_a_new_current_revision(tmp_path: Path):
+    store = Store(tmp_path / "monitoring.db")
+    store.initialize()
+    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
+    item = candidate(source_id)
+
+    first_id, _ = store.save_fetched_article(fetched(item, "A"))
+    second_id, _ = store.save_fetched_article(fetched(item, "B"))
+    third_id, created = store.save_fetched_article(fetched(item, "A"))
+
+    with sqlite3.connect(tmp_path / "monitoring.db") as connection:
+        revisions = connection.execute(
+            "SELECT content_hash FROM article_revisions ORDER BY id"
+        ).fetchall()
+
+    assert [first_id, second_id, third_id] == sorted([first_id, second_id, third_id])
+    assert created is True
+    assert revisions == [
+        (article_content_hash(item.title, "A"),),
+        (article_content_hash(item.title, "B"),),
+        (article_content_hash(item.title, "A"),),
+    ]
+    assert store.latest_content_hash(item.url) == article_content_hash(item.title, "A")
+
+
 def test_foreign_keys_reject_unknown_source_and_keep_store_empty(tmp_path: Path):
     store = Store(tmp_path / "monitoring.db")
     store.initialize()
@@ -128,3 +153,26 @@ def test_source_checks_and_runs_persist_bounded_safe_error_text(tmp_path: Path):
     assert run_id > 0
     assert "secret-value" not in error
     assert len(error) <= 500
+
+
+def test_source_check_errors_redact_cookie_token_and_query_secrets(tmp_path: Path):
+    store = Store(tmp_path / "monitoring.db")
+    store.initialize()
+    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
+
+    store.record_source_check(
+        source_id,
+        "2026-09-18T04:00:00Z",
+        "failed",
+        0,
+        "Cookie: session=private-cookie\nX-Token: private-token\n"
+        "GET https://example.test/feed?access_token=query-token&client_secret=query-secret&password=query-password&kind=article",
+    )
+    store.record_source_check(source_id, "2026-09-18T05:00:00Z", "failed", 0, "Connection timed out after 5 seconds")
+
+    with sqlite3.connect(tmp_path / "monitoring.db") as connection:
+        errors = [row[0] for row in connection.execute("SELECT error FROM source_checks ORDER BY id")]
+
+    assert all(value not in errors[0] for value in ["private-cookie", "private-token", "query-token", "query-secret", "query-password", "session="])
+    assert "kind=article" in errors[0]
+    assert errors[1] == "Connection timed out after 5 seconds"
