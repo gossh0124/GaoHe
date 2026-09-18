@@ -1,4 +1,5 @@
 import gaohe.sources as sources
+import pytest
 from gaohe.sources import (
     MAX_CANDIDATES,
     MAX_RESPONSE_BYTES,
@@ -49,6 +50,42 @@ def test_urllib_transport_uses_bounded_request_and_removes_authorization_headers
         "timeout": 3.5,
         "url": "https://example.test/start",
     }
+
+
+def test_urllib_transport_clamps_large_timeout_before_opening_connection(monkeypatch):
+    seen: dict[str, float] = {}
+
+    class Response:
+        status = 200
+        headers: dict[str, str] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def geturl(self):
+            return "https://example.test/final"
+
+        def read(self, _size):
+            return b""
+
+    def fake_urlopen(_request, timeout):
+        seen["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(sources, "urlopen", fake_urlopen)
+
+    sources.UrllibTransport().fetch("https://example.test/start", timeout_seconds=999)
+
+    assert seen["timeout"] == 20.0
+
+
+@pytest.mark.parametrize("timeout_seconds", [0, -1])
+def test_urllib_transport_rejects_non_positive_timeouts(timeout_seconds):
+    with pytest.raises(ValueError, match="timeout_seconds must be positive"):
+        sources.UrllibTransport().fetch("https://example.test/start", timeout_seconds=timeout_seconds)
 
 
 def test_parse_rss_preserves_article_metadata_and_rejects_relative_links():
@@ -123,7 +160,7 @@ def test_parse_html_list_resolves_relative_links_and_ignores_navigation():
 def test_invalid_or_oversized_discovery_payloads_return_no_candidates():
     assert parse_feed(b"<rss>", "https://example.test/feed") == []
     assert parse_sitemap(b"<urlset>", "https://example.test/sitemap") == []
-    assert parse_html_list(b"<a href='/story'>Story</a>", "https://example.test/")
+    assert parse_html_list(b"<a href='mailto:editor@example.test'>Story</a>", "https://example.test/") == []
     assert parse_feed(b"x" * (MAX_RESPONSE_BYTES + 1), "https://example.test/feed") == []
 
 
@@ -150,6 +187,18 @@ def test_extract_article_text_decodes_charset_and_drops_hidden_chrome():
     assert extract_article_text(body, "text/html; charset=iso-8859-1") == (
         "Headline\nCaf\xe9 story\nFirst point\nSecond point"
     )
+
+
+def test_extract_article_text_keeps_plain_semantic_container_text_without_duplicate_children():
+    body = b"<main>Plain main text <span>with inline text</span><p>Child paragraph</p></main>"
+
+    assert extract_article_text(body) == "Plain main text with inline text\nChild paragraph"
+
+
+def test_extract_article_text_keeps_article_div_text_before_structured_child():
+    body = b"<article><div>Article div text</div><p>Child paragraph</p></article>"
+
+    assert extract_article_text(body) == "Article div text\nChild paragraph"
 
 
 def test_extract_article_text_returns_empty_for_oversized_or_non_html_content():

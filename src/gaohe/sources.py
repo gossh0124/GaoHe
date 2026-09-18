@@ -14,6 +14,7 @@ from .domain import ArticleCandidate
 
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_CANDIDATES = 500
+MAX_TIMEOUT_SECONDS = 20.0
 _DROP_TAGS = {"form", "footer", "header", "nav", "script", "style"}
 _TEXT_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "li", "p"}
 _CHARSET = re.compile(r"charset\s*=\s*[\"']?([^\s;\"']+)", re.IGNORECASE)
@@ -33,6 +34,9 @@ class HttpTransport(Protocol):
 
 class UrllibTransport:
     def fetch(self, url: str, timeout_seconds: float = 20.0) -> HttpResponse:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        timeout_seconds = min(float(timeout_seconds), MAX_TIMEOUT_SECONDS)
         request = Request(url, headers={"User-Agent": "GaoHe/0.1 source-monitor (stdlib)"})
         try:
             with urlopen(request, timeout=timeout_seconds) as response:
@@ -191,12 +195,23 @@ class _TextParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.ignored = 0
         self.current: list[str] | None = None
+        self.plain: list[str] = []
         self.parts: list[str] = []
+        self.semantic_depth = 0
+
+    def _flush_plain(self) -> None:
+        text = _text("".join(self.plain))
+        if text:
+            self.parts.append(text)
+        self.plain = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in _DROP_TAGS:
             self.ignored += 1
+        elif not self.ignored and tag in {"article", "main"}:
+            self.semantic_depth += 1
         elif not self.ignored and tag in _TEXT_TAGS:
+            self._flush_plain()
             self.current = []
 
     def handle_endtag(self, tag: str) -> None:
@@ -207,10 +222,15 @@ class _TextParser(HTMLParser):
             if text:
                 self.parts.append(text)
             self.current = None
+        elif not self.ignored and tag in {"article", "main"} and self.semantic_depth:
+            self._flush_plain()
+            self.semantic_depth -= 1
 
     def handle_data(self, data: str) -> None:
         if not self.ignored and self.current is not None:
             self.current.append(data)
+        elif not self.ignored and self.semantic_depth:
+            self.plain.append(data)
 
 
 def extract_article_text(body: bytes, content_type: str | None = None) -> str:
