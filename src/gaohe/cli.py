@@ -1,9 +1,13 @@
 import argparse
 from collections.abc import Sequence
 from pathlib import Path
+import sqlite3
 
 from . import __version__
 from .config import load_settings
+from .monitor import watch_once
+from .sources import UrllibTransport
+from .storage import Store
 from .web import serve
 
 
@@ -17,6 +21,9 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--host", default="127.0.0.1")
     status.add_argument("--port", type=int, default=8000)
     status.add_argument("--env-file", type=Path, default=Path(".env"))
+    watch = commands.add_parser("watch")
+    watch.add_argument("--once", action="store_true", required=True)
+    watch.add_argument("--env-file", type=Path, default=Path(".env"))
     return parser
 
 
@@ -41,6 +48,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "serve":
         serve(host=args.host, port=args.port, env_file=args.env_file)
+        return 0
+    if args.command == "watch":
+        try:
+            settings = load_settings(args.env_file)
+            store = Store(settings.database_path)
+            store.initialize()
+        except (OSError, ValueError, sqlite3.Error):
+            return 2
+        summary = watch_once(settings, store, UrllibTransport())
+        print(
+            f"checked={summary.sources_checked} candidates={summary.candidates_seen} "
+            f"revisions={summary.revisions_created} failures={summary.failures}"
+        )
         return 0
     parser.print_help()
     return 0

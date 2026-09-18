@@ -204,3 +204,8 @@ class Store:
                 (url,),
             ).fetchone()
             return row[0] if row else None
+
+    def latest_article_metadata(self, url: str) -> dict[str, str] | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT metadata_json FROM articles WHERE url = ?", (url,)).fetchone()
+            return json.loads(row[0]) if row else None
