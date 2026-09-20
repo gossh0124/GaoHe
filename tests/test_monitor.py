@@ -79,6 +79,34 @@ def test_new_article_is_bound_to_persisted_source_before_its_first_revision(tmp_
         assert connection.execute("SELECT source_id FROM articles").fetchall() == [(source_id,)]
 
 
+def test_failed_first_fetch_preserves_candidate_metadata_for_a_later_revision(tmp_path):
+    store = make_store(tmp_path)
+    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
+    transport = FakeTransport(
+        {
+            "https://example.test/feed": response("https://example.test/feed", rss(), "application/rss+xml"),
+            "https://example.test/story": OSError("offline"),
+        }
+    )
+
+    first = monitor(Settings(data_dir=tmp_path), store, transport)
+
+    assert (first.revisions_created, first.failures) == (0, 1)
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT source_id, url, title FROM articles").fetchall() == [
+            (source_id, "https://example.test/story", "Story")
+        ]
+        assert connection.execute("SELECT id FROM article_revisions").fetchall() == []
+
+    transport.responses["https://example.test/story"] = response(
+        "https://example.test/story", b"<main><p>Recovered body</p></main>"
+    )
+
+    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT text FROM article_revisions").fetchall() == [("Recovered body",)]
+
+
 def test_unchanged_article_creates_no_revision_on_a_second_run(tmp_path):
     store = make_store(tmp_path)
     store.add_source(Source(None, "Example", "https://example.test/feed"))

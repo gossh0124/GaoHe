@@ -42,7 +42,7 @@ WEB_SEARCH_PROVIDER=none
 & .\.venv\Scripts\python.exe -m gaohe serve --port 8000
 ```
 
-可選擇 `--article-url` 設定新聞列表網址；用 `source disable --id ID` 暫停、`source enable --id ID` 恢復來源。`doctor` 與本機 status page 只顯示金鑰是否存在，不會顯示內容。`serve` 預設只綁定 `127.0.0.1`；開啟後以瀏覽器前往 `http://127.0.0.1:8000/` 檢查本機 runtime。
+可選擇 `--article-url` 儲存新聞列表網址作為來源 metadata，保留給未來的文章列表探索；目前 `watch --once` 僅監測 `--feed-url`。用 `source disable --id ID` 暫停、`source enable --id ID` 恢復來源。`doctor` 與本機 status page 只顯示金鑰是否存在，不會顯示內容。`serve` 預設只綁定 `127.0.0.1`；開啟後以瀏覽器前往 `http://127.0.0.1:8000/` 檢查本機 runtime。
 
 ## 監測契約
 

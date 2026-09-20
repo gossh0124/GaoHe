@@ -5,12 +5,14 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Iterator
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .domain import FetchedArticle, RunSummary, Source, article_content_hash
 
 
-_SENSITIVE_HEADER = re.compile(r"(?im)^[^\r\n:]*?(?:authorization|cookie|token|secret|password|session|api[-_]key)[^\r\n:]*:\s*[^\r\n]*")
-_SENSITIVE_QUERY = re.compile(r"(?i)([?&][^=&#\s]*(?:authorization|cookie|token|secret|password|session|api[-_]key)[^=&#\s]*=)[^&#\s]*")
+_SENSITIVE_NAME = r"(?:authorization|cookie|token|secret|password|session|api[-_]key)"
+_SENSITIVE_HEADER = re.compile(rf"(?im)^[^\r\n:]*?{_SENSITIVE_NAME}[^\r\n:]*:\s*[^\r\n]*")
+_SENSITIVE_QUERY = re.compile(rf"(?i)([?&][^=&#\s]*{_SENSITIVE_NAME}[^=&#\s]*=)[^&#\s]*")
 _SENSITIVE_VALUE = re.compile(r"(?i)\b(?:api[_-]?key|(?:access|refresh|client)[_-]?(?:token|secret)|token|secret|password|passwd|pwd|session(?:[_-]?id)?)\s*=\s*[^\s,;&]+")
 _BEARER_TOKEN = re.compile(r"(?i)bearer\s+[^\s,;]+")
 
@@ -29,6 +31,15 @@ def _safe_error(error: str | None) -> str | None:
     redacted = _SENSITIVE_QUERY.sub(r"\1[redacted]", redacted)
     redacted = _SENSITIVE_VALUE.sub(lambda match: match.group(0).split("=", 1)[0] + "=[redacted]", redacted)
     return _BEARER_TOKEN.sub("Bearer [redacted]", redacted)[:500]
+
+
+def redact_url(value: str) -> str:
+    parsed = urlsplit(value)
+    query = urlencode([
+        (key, "***" if re.search(_SENSITIVE_NAME, key, re.IGNORECASE) else query_value)
+        for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
+    ])
+    return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, query, parsed.fragment))
 
 
 class Store:
@@ -151,24 +162,32 @@ class Store:
             cursor = connection.execute("UPDATE sources SET enabled = ? WHERE id = ?", (int(enabled), source_id))
             return cursor.rowcount == 1
 
+    @staticmethod
+    def _save_candidate(connection: sqlite3.Connection, candidate) -> tuple[int, int | None]:
+        connection.execute(
+            """INSERT INTO articles (source_id, url, title, published_at, discovered_at, metadata_json)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(url) DO UPDATE SET source_id = excluded.source_id, title = excluded.title,
+                 published_at = excluded.published_at, discovered_at = excluded.discovered_at,
+                 metadata_json = excluded.metadata_json""",
+            (candidate.source_id, candidate.url, candidate.title, _utc_iso(candidate.published_at) if candidate.published_at else None,
+             _utc_iso(candidate.discovered_at), json.dumps(candidate.metadata, sort_keys=True, ensure_ascii=False)),
+        )
+        return connection.execute(
+            "SELECT id, current_revision_id FROM articles WHERE url = ?", (candidate.url,)
+        ).fetchone()
+
+    def save_candidate(self, candidate) -> None:
+        with self._connection() as connection:
+            self._save_candidate(connection, candidate)
+
     def save_fetched_article(self, article: FetchedArticle) -> tuple[int, bool]:
         expected_hash = article_content_hash(article.candidate.title, article.text)
         if article.content_hash != expected_hash:
             raise ValueError("content_hash must match normalized title and text")
         candidate = article.candidate
         with self._connection() as connection:
-            connection.execute(
-                """INSERT INTO articles (source_id, url, title, published_at, discovered_at, metadata_json)
-                   VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(url) DO UPDATE SET source_id = excluded.source_id, title = excluded.title,
-                     published_at = excluded.published_at, discovered_at = excluded.discovered_at,
-                     metadata_json = excluded.metadata_json""",
-                (candidate.source_id, candidate.url, candidate.title, _utc_iso(candidate.published_at) if candidate.published_at else None,
-                 _utc_iso(candidate.discovered_at), json.dumps(candidate.metadata, sort_keys=True, ensure_ascii=False)),
-            )
-            article_id, current_revision_id = connection.execute(
-                "SELECT id, current_revision_id FROM articles WHERE url = ?", (candidate.url,)
-            ).fetchone()
+            article_id, current_revision_id = self._save_candidate(connection, candidate)
             if current_revision_id is not None:
                 current_hash = connection.execute(
                     "SELECT content_hash FROM article_revisions WHERE id = ?", (current_revision_id,)

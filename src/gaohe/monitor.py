@@ -78,6 +78,7 @@ def watch_once(
                     continue
                 candidate = _stored_candidate(candidate, source.id, marker)
                 try:
+                    store.save_candidate(candidate)
                     article = transport.fetch(candidate.url)
                     if not 200 <= article.status < 300:
                         raise ValueError(f"article returned HTTP {article.status}")

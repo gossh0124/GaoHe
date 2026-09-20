@@ -29,16 +29,23 @@ def test_source_list_redacts_url_credentials_and_sensitive_query_values(tmp_path
 
     assert cli.main([
         "source", "add", "--name", "Private Feed",
-        "--feed-url", "https://token:secret@example.test/feed.xml?token=feed-token&lang=zh-TW",
+        "--feed-url", "https://token:secret@example.test/feed.xml?access_token=feed-access&refresh_token=feed-refresh&client_secret=feed-secret&api-key=feed-key&lang=zh-TW",
         "--article-url", "https://reader:article-secret@example.test/news?api_key=article-key&page=2",
         "--env-file", str(env_file),
     ]) == 0
     assert cli.main(["source", "list", "--env-file", str(env_file)]) == 0
 
     output = capsys.readouterr().out
-    for secret in ("token:secret", "feed-token", "reader:article-secret", "article-key"):
+    for secret in (
+        "token:secret", "feed-access", "feed-refresh", "feed-secret", "feed-key",
+        "reader:article-secret", "article-key",
+    ):
         assert secret not in output
-    assert "https://example.test/feed.xml?token=%2A%2A%2A&lang=zh-TW" in output
+    assert "access_token=%2A%2A%2A" in output
+    assert "refresh_token=%2A%2A%2A" in output
+    assert "client_secret=%2A%2A%2A" in output
+    assert "api-key=%2A%2A%2A" in output
+    assert "lang=zh-TW" in output
     assert "https://example.test/news?api_key=%2A%2A%2A&page=2" in output
 
 
