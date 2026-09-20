@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .config import Settings
-from .domain import ArticleRevision, Claim, RetrievedPage, SearchHit, article_content_hash
+from .domain import ArticleRevision, Claim, Evidence, Finding, RetrievedPage, SearchHit, article_content_hash
 from .sources import HttpTransport, UrllibTransport, extract_article_text
 
 
@@ -29,6 +29,7 @@ class FindingCandidate:
     end: int
     materiality: str
     query: str | None
+    revision_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,8 @@ class AnalysisResult:
     revision_id: int
     claims: tuple[Claim, ...]
     candidates: tuple[FindingCandidate, ...]
+    evidence: tuple[Evidence, ...] = ()
+    findings: tuple[Finding, ...] = ()
 
 
 class AnalysisProvider(Protocol):

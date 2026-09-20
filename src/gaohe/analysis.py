@@ -1,5 +1,8 @@
-from .domain import CLAIM_EXTRACTION_STATUSES, CLAIM_KINDS, CLAIM_MATERIALITIES, ArticleRevision, Claim, normalize_article_content
-from .providers import AnalysisProvider, AnalysisResult, FindingCandidate
+from collections.abc import Sequence
+from urllib.parse import urlsplit, urlunsplit
+
+from .domain import CLAIM_EXTRACTION_STATUSES, CLAIM_KINDS, CLAIM_MATERIALITIES, ArticleRevision, Claim, Evidence, Finding, RetrievedPage, SearchHit, normalize_article_content
+from .providers import AnalysisProvider, AnalysisResult, EvidenceSearchProvider, FindingCandidate, MAX_QUERY_CHARS, MAX_SEARCH_LIMIT, PageFetcher
 
 
 _ALLOWED_FINDING_TYPES = frozenset({
@@ -93,3 +96,76 @@ def extract_claims(revision: ArticleRevision, provider: AnalysisProvider) -> Ana
         and _has_claim_association(candidate, result.claims, revision)
     )
     return AnalysisResult(revision.id, result.claims, candidates)
+
+
+def _canonical_url(url: str) -> str | None:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, parsed.query, ""))
+
+
+def _query(candidate: FindingCandidate) -> str:
+    return (candidate.query or candidate.summary).strip()[:MAX_QUERY_CHARS]
+
+
+def _evidence_status(page: RetrievedPage) -> str:
+    if page.status == "retrieved" and page.url and page.text.strip():
+        return "retrieved"
+    if page.status in {"parse_error", "oversized", "retrieved"}:
+        return "insufficient_scope"
+    return "retrieval_failed"
+
+
+def retrieve_evidence(candidate: FindingCandidate, search: EvidenceSearchProvider, fetcher: PageFetcher, limit: int = 5) -> list[Evidence]:
+    """Fetch bounded, deduplicated full-text evidence; search snippets never become evidence."""
+    query = _query(candidate)
+    if not query:
+        return []
+    bounded_limit = min(max(1, limit), MAX_SEARCH_LIMIT)
+    hits: list[SearchHit] = []
+    seen: set[str] = set()
+    for hit in search.search(query, bounded_limit):
+        canonical = _canonical_url(hit.url)
+        if canonical is not None and canonical not in seen:
+            seen.add(canonical)
+            hits.append(hit)
+            if len(hits) == bounded_limit:
+                break
+    result: list[Evidence] = []
+    for hit in hits:
+        page = fetcher.fetch(hit.url)
+        status = _evidence_status(page)
+        if status == "retrieved":
+            result.append(Evidence(None, None, page.url, page.title, page.text, "supports", "retrieved", "search", page.retrieved_at, hit.source, hit.published_at, page.content_hash))
+        else:
+            result.append(Evidence(None, None, hit.url, hit.title, "", "context", status, "search", page.retrieved_at, hit.source, hit.published_at, None))
+    return result
+
+
+def _usable(evidence: Evidence, relations: set[str], source_kind: str | None = None) -> bool:
+    return evidence.status == "retrieved" and evidence.relation in relations and _canonical_url(evidence.url) is not None and bool(evidence.excerpt.strip()) and (source_kind is None or evidence.source_kind == source_kind)
+
+
+def resolve_finding(candidate: FindingCandidate, evidence: Sequence[Evidence], related: Sequence[ArticleRevision]) -> Finding:
+    """Resolve only explicit, retrievable full-text evidence; otherwise remain pending."""
+    if candidate.finding_type == "factual_contradiction":
+        visible = any(_usable(item, {"contradicts"}) for item in evidence)
+    elif candidate.finding_type == "material_cross_media_difference":
+        visible = bool(related) and any(_usable(item, {"contradicts"}, "related_article") for item in evidence)
+    elif candidate.finding_type == "unsupported_inference":
+        visible = any(_usable(item, {"context", "contradicts"}) for item in evidence)
+    else:
+        visible = False
+    statuses = {item.status for item in evidence}
+    evidence_status = "retrieved" if any(item.status == "retrieved" for item in evidence) else ("retrieval_failed" if "retrieval_failed" in statuses else ("insufficient_scope" if "insufficient_scope" in statuses else "pending"))
+    return Finding(None, candidate.revision_id or 0, candidate.claim_id, candidate.finding_type, candidate.summary, candidate.start, candidate.end, "resolved" if visible else "pending", evidence_status, visible)
+
+
+def analyze_revision(revision: ArticleRevision, related: Sequence[ArticleRevision], analysis: AnalysisProvider, search: EvidenceSearchProvider, fetcher: PageFetcher) -> AnalysisResult:
+    extracted = extract_claims(revision, analysis)
+    candidates = tuple(candidate if candidate.revision_id is not None else FindingCandidate(candidate.claim_id, candidate.finding_type, candidate.summary, candidate.start, candidate.end, candidate.materiality, candidate.query, revision.id) for candidate in extracted.candidates)
+    evidence_batches = tuple(retrieve_evidence(candidate, search, fetcher) for candidate in candidates)
+    evidence = tuple(item for batch in evidence_batches for item in batch)
+    findings = tuple(resolve_finding(candidate, batch, related) for candidate, batch in zip(candidates, evidence_batches))
+    return AnalysisResult(revision.id, extracted.claims, candidates, evidence, findings)

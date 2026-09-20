@@ -56,8 +56,8 @@ def test_extract_claims_keeps_an_explicit_material_candidate_pending_without_vis
     result = extract_claims(item, provider)
 
     assert result.candidates == (valid,)
-    assert not hasattr(result, "findings")
-    assert not hasattr(result, "evidence")
+    assert result.findings == ()
+    assert result.evidence == ()
 
 
 def test_extract_claims_rejects_duplicate_valid_claim_spans_before_persistence():
@@ -175,8 +175,8 @@ def test_tone_only_ordinary_proposal_stays_pre_evidence_and_has_no_visible_outpu
     assert is_material_candidate(stated, keyword_only, item) is False
     result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), (keyword_only,))))
     assert result.candidates == ()
-    assert not hasattr(result, "findings")
-    assert not hasattr(result, "evidence")
+    assert result.findings == ()
+    assert result.evidence == ()
 
 
 def test_approximate_450_500_520_claims_remain_background_until_task_4_or_5_resolution():
