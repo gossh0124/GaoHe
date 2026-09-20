@@ -8,9 +8,31 @@
 
 這個 repo 是依專案規格建立的新基線。先前提到的外部 `berhen5888/GaoHe` repo 與功能分支目前無法取得，因此本次內容不宣稱恢復了既有實作。
 
-目前提供 Windows 原生的監測基礎：來源清單、RSS／列表／sitemap 探索、文章 metadata 與內容版本的本機 SQLite 紀錄、一次性監測命令及本機 status page。`analyze --pending` 已提供本機的 provider-neutral 分析、證據狀態與保守同題 context；標註使用者介面與排程仍未實作。
+目前提供 Windows 原生的監測基礎：來源清單、RSS／列表／sitemap 探索、文章 metadata 與內容版本的本機 SQLite 紀錄、一次性監測命令、本機 status page、首次設定精靈與使用者層級排程。`analyze --pending` 已提供本機的 provider-neutral 分析、證據狀態與保守同題 context。
 
-## Windows 原生安裝
+## 一般 Windows 使用者：GitHub Release ZIP
+
+從 GitHub Release 下載並完整解壓縮 ZIP；不需要 Git。電腦需先安裝 Python 3.11 或更新版本。雙擊 `setup.cmd`，它會建立（或重用）此資料夾內的 `.venv`、以本機套件啟動設定精靈，並在瀏覽器要求輸入**自己的** AI provider/key、模型與至少一個媒體 RSS／列表網址。每位下載者各自使用自己的帳號、額度與條款，key 僅保留在本機 `.env`。
+
+完成精靈後，可在 PowerShell 於解壓縮資料夾執行：
+
+```powershell
+& .\.venv\Scripts\python.exe -m gaohe schedule install --env-file .env
+& .\.venv\Scripts\python.exe -m gaohe schedule status
+& .\.venv\Scripts\python.exe -m gaohe serve --env-file .env
+```
+
+`schedule status` 應回報 `installed`；本機頁面預設在 `http://127.0.0.1:8000/`。排程只在目前登入使用者下定期執行，不建立 Windows Service，也不保存 Windows 密碼。
+
+要移除工具時，雙擊 `uninstall.cmd`。預設只移除固定名稱的 `GaoHe Watch` 排程與此專案的 `.venv`，會保留 `.env` 和 SQLite 資料。若確定要刪除設定或資料，請在 PowerShell 明確輸入：
+
+```powershell
+.\uninstall.cmd -DeleteConfig -DeleteData -Confirmation "DELETE GAOHE DATA"
+```
+
+腳本會先顯示實際解析後的刪除路徑；確認文字不完全相同時，不會刪除設定或資料，並以非零狀態結束。單一檔案 EXE 仍暫緩，待 ZIP 流程取得真實使用者回饋後再評估。
+
+## 開發者安裝
 
 需求：Python 3.11 或更新版本與 Git。若 `py` launcher 不在 PATH，請以你安裝的 `python.exe` 取代下方的 `py -3.11`。
 
@@ -57,7 +79,7 @@ WEB_SEARCH_PROVIDER=none
 & .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-GitHub Actions 使用 `windows-latest` 與 Python 3.11，在每次 push／PR 執行安裝與 pytest。CI 使用 deterministic tests，不呼叫外部 provider 或搜尋服務，也不需要 API secret；CI 綠燈不等於新聞事實判斷正確。
+GitHub Actions 使用 `windows-latest` 與 Python 3.11，在每次 push／PR 執行安裝與 pytest。CI 使用 deterministic tests，不呼叫外部 provider 或搜尋服務、不建立真正的 Task Scheduler 工作，也不需要 API secret；CI 綠燈不等於新聞事實判斷正確。上述安裝精靈與排程尚未完成真人瀏覽器／Task Scheduler 操作驗收。
 
 ## CD
 
