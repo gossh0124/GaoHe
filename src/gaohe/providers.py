@@ -227,7 +227,7 @@ def _normalized_fallback_page(url: str, value: object) -> RetrievedPage | None:
         return None
     title = title[:MAX_PAGE_TITLE_CHARS]
     text = text[:MAX_PAGE_TEXT_CHARS]
-    if not text:
+    if not title.strip() or not text:
         return None
     return RetrievedPage(page_url, title, text, _now(), "retrieved", article_content_hash(title, text))
 

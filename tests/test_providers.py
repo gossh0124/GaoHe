@@ -186,8 +186,16 @@ def test_direct_fetcher_normalizes_fallback_page_and_recomputes_hash():
     assert page.content_hash != "forged-hash"
 
 
-@pytest.mark.parametrize("fallback", [lambda _url: RetrievedPage("ftp://fallback.test/article", "Title", "Text", "", "retrieved", None), lambda _url: ("Title", "")])
-def test_direct_fetcher_rejects_invalid_or_empty_fallback_page(fallback):
+@pytest.mark.parametrize(
+    "fallback",
+    [
+        lambda _url: RetrievedPage("ftp://fallback.test/article", "Title", "Text", "", "retrieved", None),
+        lambda _url: ("Title", ""),
+        lambda _url: ("", "body"),
+        lambda _url: (" \t", "body"),
+    ],
+)
+def test_direct_fetcher_rejects_invalid_or_incomplete_fallback_page(fallback):
     from gaohe.providers import DirectPageFetcher
 
     page = DirectPageFetcher(FakeTransport(HttpResponse(503, "https://evidence.test/article", {}, b"")), fallback=fallback, firecrawl_api_key="secret").fetch("https://evidence.test/article")
