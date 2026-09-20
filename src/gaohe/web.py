@@ -4,7 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from .config import Settings, load_settings
 from .domain import Finding
@@ -83,7 +83,7 @@ def _evidence_link(item: object) -> str:
         valid = parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password
     except ValueError:
         valid = False
-    if not valid:
+    if not valid or _SENSITIVE_METADATA.search(unquote(parsed.fragment)):
         return ""
     safe_url = redact_url(url)
     title = _text(_safe_metadata(_value(item, "title", _value(item, "name", "Evidence"))) or "Evidence")

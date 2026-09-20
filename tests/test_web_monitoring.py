@@ -100,16 +100,26 @@ def test_evidence_redacts_url_secrets_and_hides_sensitive_metadata():
     })
     for secret in ("never-show", "also-never-show", "metadata-secret", "provider-secret", "timestamp-secret"):
         assert secret not in page
-    assert "api_key=%2A%2A%2A" in page and "access_token=***" in page
+    assert "record.example/evidence" not in page
     ordinary = render_status_page({
         "inbox": ({"text": "safe", "evidence": {
-            "url": "https://record.example/evidence",
+            "url": "https://record.example/evidence#section-1",
             "title": "Official record", "provider": "Public archive", "retrieved_at": "2026-09-21T00:00:00Z",
         }},),
         "findings": (), "sources": (), "comparisons": (), "runtime": {},
     })
     for value in ("Official record", "Public archive", "2026-09-21T00:00:00Z"):
         assert value in ordinary
+    assert "#section-1" in ordinary
+
+
+def test_evidence_rejects_percent_encoded_sensitive_fragment():
+    url = "https://record.example/evidence#api%5Fkey%3Dfragment-secret"
+    page = render_status_page({
+        "inbox": ({"text": "safe", "evidence": {"url": url, "title": "never"}},),
+        "findings": (), "sources": (), "comparisons": (), "runtime": {},
+    })
+    assert "fragment-secret" not in page and url not in page and "never" not in page
 
 
 def test_setup_page_masks_state_and_settings_remain_compatible():
