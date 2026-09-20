@@ -17,6 +17,7 @@ _SENSITIVE_QUERY = re.compile(rf"(?i)([?&][^=&#\s]*{_SENSITIVE_NAME}[^=&#\s]*=)[
 _SENSITIVE_FRAGMENT = re.compile(rf"(?i)(^|[?&])([^=&#\s]*{_SENSITIVE_NAME}[^=&#\s]*=)[^&#\s]*")
 _SENSITIVE_VALUE = re.compile(r"(?i)\b(?:api[_-]?key|(?:access|refresh|client)[_-]?(?:token|secret)|token|secret|password|passwd|pwd|session(?:[_-]?id)?)\s*=\s*[^\s,;&]+")
 _BEARER_TOKEN = re.compile(r"(?i)bearer\s+[^\s,;]+")
+MAX_EVIDENCE_EXCERPT_CHARS = 2_000
 _PROVIDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _EVIDENCE_RELATIONS = {"supports", "contradicts", "context"}
 _EVIDENCE_STATUSES = {"pending", "retrieved", "retrieval_failed", "insufficient_scope"}
@@ -46,6 +47,16 @@ def _safe_error(error: str | None) -> str | None:
     redacted = _SENSITIVE_QUERY.sub(r"\1[redacted]", redacted)
     redacted = _SENSITIVE_VALUE.sub(lambda match: match.group(0).split("=", 1)[0] + "=[redacted]", redacted)
     return _BEARER_TOKEN.sub("Bearer [redacted]", redacted)[:500]
+
+
+def redact_text(value: str, limit: int = MAX_EVIDENCE_EXCERPT_CHARS) -> str:
+    """Keep evidence excerpts bounded without persisting common credential forms."""
+    if not isinstance(value, str) or limit < 1:
+        return ""
+    redacted = _SENSITIVE_HEADER.sub("[redacted]", value)
+    redacted = _SENSITIVE_QUERY.sub(r"\1[redacted]", redacted)
+    redacted = _SENSITIVE_VALUE.sub(lambda match: match.group(0).split("=", 1)[0] + "=[redacted]", redacted)
+    return _BEARER_TOKEN.sub("Bearer [redacted]", redacted)[:limit]
 
 
 def redact_url(value: str) -> str:
@@ -398,7 +409,7 @@ class Store:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (evidence.finding_id, redact_url(evidence.url),
                  evidence.title if evidence.status == "retrieved" else f"Evidence {evidence.status.replace('_', ' ')}",
-                 evidence.excerpt if evidence.status == "retrieved" else "", evidence.relation, evidence.status,
+                 redact_text(evidence.excerpt) if evidence.status == "retrieved" else "", evidence.relation, evidence.status,
                  evidence.source_kind, _utc_iso(evidence.retrieved_at) if evidence.retrieved_at else None, _safe_provider_name(evidence.provider),
                  _utc_iso(evidence.published_at) if evidence.published_at else None, evidence.content_hash),
             )
