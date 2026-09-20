@@ -65,7 +65,11 @@ def _failed_page(url: str, status: str) -> RetrievedPage:
 
 class NullSearchProvider:
     def search(self, query: str, limit: int = 5) -> Sequence[SearchHit]:
-        del query, limit
+        del query
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("Search limit must be positive")
+        limit = min(limit, MAX_SEARCH_LIMIT)
+        del limit
         return ()
 
 
@@ -85,9 +89,10 @@ GeminiRequest = Callable[[str, Mapping[str, object], str], str]
 
 
 class GeminiAnalysisProvider:
-    def __init__(self, settings: Settings, request: GeminiRequest | None = None) -> None:
+    def __init__(self, settings: Settings, request: GeminiRequest | None = None, *, urlopen_request: Callable[..., object] = urlopen) -> None:
         self._model = settings.llm_model
         self._api_key = settings.llm_api_key
+        self._urlopen = urlopen_request
         self._request = request or self._post
 
     def analyze(self, revision: ArticleRevision, related: Sequence[ArticleRevision]) -> AnalysisResult:
@@ -104,9 +109,9 @@ class GeminiAnalysisProvider:
         except ValueError as error:
             if str(error) == "Gemini returned invalid analysis response":
                 raise
-            raise ValueError("Gemini analysis request failed") from error
-        except Exception as error:
-            raise ValueError("Gemini analysis request failed") from error
+            raise ValueError("Gemini analysis request failed") from None
+        except Exception:
+            raise ValueError("Gemini analysis request failed") from None
 
     @staticmethod
     def _parse(revision: ArticleRevision, raw: str) -> AnalysisResult:
@@ -121,18 +126,17 @@ class GeminiAnalysisProvider:
                 for item in claims_raw
             )
             candidates = tuple(
-                FindingCandidate(_optional_integer(item, "claim_id"), _string(item, "finding_type"), _string(item, "summary"), _integer(item, "start"), _integer(item, "end"), _string(item, "materiality"), _optional_string(item, "query"))
+                FindingCandidate(_optional_integer(item, "claim_id"), _string(item, "finding_type"), _string(item, "summary"), _integer(item, "start"), _integer(item, "end"), _string(item, "materiality"), _bounded_optional_string(item, "query", MAX_QUERY_CHARS))
                 for item in candidates_raw
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             raise ValueError("Gemini returned invalid analysis response") from None
         return AnalysisResult(revision.id, claims, candidates)
 
-    @staticmethod
-    def _post(model: str, payload: Mapping[str, object], api_key: str) -> str:
-        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-        request = Request(endpoint, data=json.dumps({"contents": [{"parts": [{"text": json.dumps(payload)}]}]}).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(request, timeout=20) as response:
+    def _post(self, model: str, payload: Mapping[str, object], api_key: str) -> str:
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        request = Request(endpoint, data=json.dumps({"contents": [{"parts": [{"text": json.dumps(payload)}]}]}).encode("utf-8"), headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, method="POST")
+        with self._urlopen(request, timeout=20) as response:
             body = response.read(MAX_PAGE_BYTES + 1)
         if len(body) > MAX_PAGE_BYTES:
             raise ValueError("response too large")
@@ -158,6 +162,11 @@ def _optional_string(value: object, key: str) -> str | None:
     if item is not None and not isinstance(item, str):
         raise TypeError
     return item
+
+
+def _bounded_optional_string(value: object, key: str, maximum: int) -> str | None:
+    item = _optional_string(value, key)
+    return item[:maximum] if item is not None else None
 
 
 def _integer(value: object, key: str) -> int:
@@ -205,6 +214,24 @@ def _page_title(body: bytes) -> str:
 Fallback = PageFetcher | Callable[[str], RetrievedPage | tuple[str, str]]
 
 
+def _normalized_fallback_page(url: str, value: object) -> RetrievedPage | None:
+    if isinstance(value, RetrievedPage):
+        if value.status != "retrieved":
+            return None
+        page_url, title, text = value.url, value.title, value.text
+    elif isinstance(value, tuple) and len(value) == 2:
+        page_url, (title, text) = url, value
+    else:
+        return None
+    if not _is_http_url(page_url) or not isinstance(title, str) or not isinstance(text, str):
+        return None
+    title = title[:MAX_PAGE_TITLE_CHARS]
+    text = text[:MAX_PAGE_TEXT_CHARS]
+    if not text:
+        return None
+    return RetrievedPage(page_url, title, text, _now(), "retrieved", article_content_hash(title, text))
+
+
 class DirectPageFetcher:
     def __init__(self, transport: HttpTransport | None = None, *, fallback: Fallback | None = None, firecrawl_api_key: str = "") -> None:
         self._transport = transport or UrllibTransport()
@@ -235,10 +262,8 @@ class DirectPageFetcher:
             return _failed_page(url, status)
         try:
             page = self._fallback.fetch(url) if hasattr(self._fallback, "fetch") else self._fallback(url)
-            if isinstance(page, tuple):
-                title, text = page
-                page = RetrievedPage(url, title[:MAX_PAGE_TITLE_CHARS], text[:MAX_PAGE_TEXT_CHARS], _now(), "retrieved", article_content_hash(title, text))
-            return page if page.status == "retrieved" and _is_http_url(page.url) else _failed_page(url, status)
+            normalized = _normalized_fallback_page(url, page)
+            return normalized or _failed_page(url, status)
         except Exception:
             return _failed_page(url, status)
 
@@ -252,11 +277,7 @@ class FirecrawlPageFetcher:
         if not _is_http_url(url) or not self._api_key:
             return _failed_page(url, "invalid_url" if not _is_http_url(url) else "unavailable")
         try:
-            title, text = self._fetch(url, self._api_key)
+            page = _normalized_fallback_page(url, self._fetch(url, self._api_key))
         except Exception:
             return _failed_page(url, "retrieval_failed")
-        text = text[:MAX_PAGE_TEXT_CHARS]
-        if not text:
-            return _failed_page(url, "parse_error")
-        title = title[:MAX_PAGE_TITLE_CHARS]
-        return RetrievedPage(url, title, text, _now(), "retrieved", article_content_hash(title, text))
+        return page or _failed_page(url, "retrieval_failed")
