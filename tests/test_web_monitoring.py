@@ -88,6 +88,30 @@ def test_evidence_links_are_safe_escaped_and_available_on_articles_and_findings(
     assert "javascript:" not in rejected and "user:secret" not in rejected and "also never" not in rejected
 
 
+def test_evidence_redacts_url_secrets_and_hides_sensitive_metadata():
+    page = render_status_page({
+        "inbox": ({"text": "safe", "evidence": {
+            "url": "https://record.example/evidence?api_key=never-show#access_token=also-never-show",
+            "title": '{"api_key":"metadata-secret"}',
+            "provider": "Bearer provider-secret",
+            "retrieved_at": '"authorization":"timestamp-secret"',
+        }},),
+        "findings": (), "sources": (), "comparisons": (), "runtime": {},
+    })
+    for secret in ("never-show", "also-never-show", "metadata-secret", "provider-secret", "timestamp-secret"):
+        assert secret not in page
+    assert "api_key=%2A%2A%2A" in page and "access_token=***" in page
+    ordinary = render_status_page({
+        "inbox": ({"text": "safe", "evidence": {
+            "url": "https://record.example/evidence",
+            "title": "Official record", "provider": "Public archive", "retrieved_at": "2026-09-21T00:00:00Z",
+        }},),
+        "findings": (), "sources": (), "comparisons": (), "runtime": {},
+    })
+    for value in ("Official record", "Public archive", "2026-09-21T00:00:00Z"):
+        assert value in ordinary
+
+
 def test_setup_page_masks_state_and_settings_remain_compatible():
     setup = render_setup_page({"configured": True, "has_llm_key": True, "source_count": 1, "api_key": "secret"})
     assert "secret" not in setup and "AI key: present" in setup

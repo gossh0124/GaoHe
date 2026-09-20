@@ -2,11 +2,13 @@ from collections.abc import Mapping, Sequence
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from .config import Settings, load_settings
 from .domain import Finding
+from .storage import redact_text, redact_url
 
 if TYPE_CHECKING:
     from .storage import Store
@@ -30,6 +32,10 @@ _RUNTIME_FIELDS = (
     ("Data directory", "Data directory"),
     ("LLM API key", "LLM API key"),
 )
+_SENSITIVE_METADATA = re.compile(
+    r"(?i)(?:bearer\s+\S+|[\"']?(?:authorization|cookie|token|secret|password|session|api[-_]key|access[_-]?token)[\"']?\s*[:=])"
+)
+_MAX_EVIDENCE_METADATA_CHARS = 200
 
 
 def _text(value: object, default: str = "") -> str:
@@ -61,6 +67,13 @@ def _evidence_items(item: object) -> Sequence[object]:
     return (evidence,) if isinstance(evidence, Mapping) else _items(evidence)
 
 
+def _safe_metadata(value: object) -> str:
+    if not isinstance(value, str) or len(value) > _MAX_EVIDENCE_METADATA_CHARS or _SENSITIVE_METADATA.search(value):
+        return ""
+    redacted = redact_text(value, limit=_MAX_EVIDENCE_METADATA_CHARS)
+    return redacted if redacted == value else ""
+
+
 def _evidence_link(item: object) -> str:
     url = _value(item, "url", _value(item, "source_url", ""))
     if not isinstance(url, str):
@@ -72,12 +85,13 @@ def _evidence_link(item: object) -> str:
         valid = False
     if not valid:
         return ""
-    title = _text(_value(item, "title", _value(item, "name", "Evidence")))
-    provider = _text(_value(item, "provider", _value(item, "source", "")))
-    retrieved = _text(_value(item, "retrieved_at", _value(item, "fetched_at", "")))
+    safe_url = redact_url(url)
+    title = _text(_safe_metadata(_value(item, "title", _value(item, "name", "Evidence"))) or "Evidence")
+    provider = _text(_safe_metadata(_value(item, "provider", _value(item, "source", ""))))
+    retrieved = _text(_safe_metadata(_value(item, "retrieved_at", _value(item, "fetched_at", ""))))
     metadata = " · ".join(value for value in (provider, retrieved) if value)
     details = f" <span class='meta'>{metadata}</span>" if metadata else ""
-    return f"<a class='evidence-link' href='{escape(url, quote=True)}' rel='noreferrer'>{title}</a>{details}"
+    return f"<a class='evidence-link' href='{escape(safe_url, quote=True)}' rel='noreferrer'>{title}</a>{details}"
 
 
 def _evidence_links(item: object) -> str:
