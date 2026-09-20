@@ -194,6 +194,15 @@ def test_compare_topic_does_not_match_english_opposites_inside_larger_words():
     assert compare_topic((unopened, reopened)) == []
 
 
+def test_compare_topic_does_not_match_reopened_on_the_left_with_closed_on_the_right():
+    from gaohe.topics import compare_topic
+
+    reopened = revision(1, "https://alpha.test/a", "Taipei defense forum", "Taipei Defense Ministry reopened the coastal permit.")
+    closed = revision(2, "https://bravo.test/b", "Taipei security forum", "Taipei Defense Ministry closed the coastal permit.")
+
+    assert compare_topic((reopened, closed)) == []
+
+
 def test_compare_topic_rejects_credential_bearing_revision_urls():
     from gaohe.topics import compare_topic
 
