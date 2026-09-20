@@ -88,14 +88,17 @@ def test_offline_windows_user_flow_keeps_key_local_and_skips_unchanged_content(t
     assert summary == {"claims": 1, "candidates": 0, "visible_findings": 0, "pending": 0, "retrieval_failures": 0}
     revision = store.list_recent_revisions()[0]
     page = render_status_page({
-        "runtime": {"LLM provider": settings.llm_provider, "LLM API key": "present"},
+        "runtime": {"LLM provider": settings.llm_provider},
         "inbox": ({"title": revision.title, "source": form["media_name"], "text": revision.text},),
         "findings": (),
         "comparisons": (),
         "sources": ({"name": form["media_name"], "status": "ok", "checked_at": NOW.isoformat(), "candidates_seen": 1},),
     })
     assert "Inbox" in page and "No visible findings." in page and "Source health" in page
-    assert revision.text in page and "sample-user-key" not in page
+    runtime_page = render_status_page(settings)
+    assert revision.text in page
+    assert "sample-user-key" not in page
+    assert "sample-user-key" not in runtime_page and "present" in runtime_page
 
     uninstall_script = (Path(__file__).parents[1] / "scripts" / "uninstall.ps1").read_text(encoding="utf-8")
     assert '$RequiredConfirmation = "DELETE GAOHE DATA"' in uninstall_script
