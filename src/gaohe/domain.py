@@ -32,6 +32,83 @@ class FetchedArticle:
 
 
 @dataclass(frozen=True)
+class ArticleRevision:
+    id: int
+    article_id: int
+    url: str
+    title: str
+    text: str
+    content_hash: str
+    fetched_at: str
+
+
+@dataclass(frozen=True)
+class Claim:
+    id: int | None
+    revision_id: int
+    text: str
+    start: int
+    end: int
+    kind: str
+    materiality: str
+    extraction_status: str
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    url: str
+    title: str
+    snippet: str
+    source: str
+    published_at: str | None
+
+
+@dataclass(frozen=True)
+class RetrievedPage:
+    url: str
+    title: str
+    text: str
+    retrieved_at: str
+    status: str
+    content_hash: str | None
+
+
+@dataclass(frozen=True)
+class Evidence:
+    id: int | None
+    finding_id: int | None
+    url: str
+    title: str
+    excerpt: str
+    relation: str
+    status: str
+    source_kind: str
+    retrieved_at: str | None
+
+
+@dataclass(frozen=True)
+class Finding:
+    id: int | None
+    revision_id: int
+    claim_id: int | None
+    finding_type: str
+    summary: str
+    start: int
+    end: int
+    status: str
+    evidence_status: str
+    visible: bool
+
+
+@dataclass(frozen=True)
+class TopicGroup:
+    id: int | None
+    label: str
+    confidence: str
+    status: str
+
+
+@dataclass(frozen=True)
 class RunSummary:
     started_at: str
     finished_at: str | None
