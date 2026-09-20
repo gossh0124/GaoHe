@@ -37,11 +37,19 @@ def _has_control(value: str) -> bool:
 
 
 def _is_source_url(value: str) -> bool:
+    if any(character.isspace() for character in value):
+        return False
     try:
         parsed = urlsplit(value)
+        _ = parsed.port
     except ValueError:
         return False
-    return parsed.scheme in {"http", "https"} and bool(parsed.hostname) and not parsed.username and not parsed.password
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+    )
 
 
 def validate_setup_form(form: Mapping[str, str]) -> list[str]:
@@ -56,8 +64,12 @@ def validate_setup_form(form: Mapping[str, str]) -> list[str]:
             errors.append(f"{label} contains invalid characters.")
         else:
             values[field] = value.strip()
+    provider = values.get("provider")
+    if provider is not None and provider != "gemini":
+        errors.append("AI provider is not supported.")
     source_url = values.get("source_url")
-    if source_url is not None and not _is_source_url(source_url):
+    raw_source_url = form.get("source_url")
+    if source_url is not None and (not isinstance(raw_source_url, str) or not _is_source_url(raw_source_url)):
         errors.append("Source URL must be a valid HTTP(S) URL.")
     return errors
 

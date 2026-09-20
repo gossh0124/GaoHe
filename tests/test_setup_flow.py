@@ -37,7 +37,9 @@ def test_setup_validation_rejects_required_or_whitespace_fields(field, value, er
 
 
 @pytest.mark.parametrize("url", [
-    "not a url", "ftp://example.test/feed", "https://user:secret@example.test/feed", "https://example.test/feed\nnext",
+    "not a url", "ftp://example.test/feed", "https://user:secret@example.test/feed", "https://@example.test/feed",
+    "https://example.test/a b", "https://example.test:abc/feed", "https://example.test:99999/feed",
+    "https://example.test/feed\nnext",
 ])
 def test_setup_validation_rejects_unsafe_urls_without_echoing_secrets(url):
     errors = validate_setup_form(valid_form(source_url=url, api_key="private-key"))
@@ -45,6 +47,13 @@ def test_setup_validation_rejects_unsafe_urls_without_echoing_secrets(url):
     assert "Source URL must be a valid HTTP(S) URL." in errors or "Source URL contains invalid characters." in errors
     assert "private-key" not in " ".join(errors)
     assert "secret" not in " ".join(errors)
+
+
+def test_setup_validation_rejects_unsupported_provider_without_echoing_input():
+    errors = validate_setup_form(valid_form(provider="unknown-private"))
+
+    assert errors == ["AI provider is not supported."]
+    assert "unknown-private" not in " ".join(errors)
 
 
 def test_setup_validation_never_echoes_key():
