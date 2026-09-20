@@ -501,6 +501,20 @@ class Store:
                 (limit,),
             )]
 
+    def list_recent_revisions(self, limit: int = 100) -> list[ArticleRevision]:
+        """Return a bounded local context pool; callers must apply topic rules."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self._connection() as connection:
+            return [ArticleRevision(*row) for row in connection.execute(
+                """SELECT revisions.id, revisions.article_id, articles.url, revisions.title,
+                          revisions.text, revisions.content_hash, revisions.fetched_at
+                   FROM article_revisions AS revisions
+                   JOIN articles ON articles.id = revisions.article_id
+                   ORDER BY revisions.fetched_at DESC, revisions.id DESC LIMIT ?""",
+                (limit,),
+            )]
+
     def list_topic_revisions(self, topic_id: int) -> list[ArticleRevision]:
         with self._connection() as connection:
             return [ArticleRevision(*row) for row in connection.execute(

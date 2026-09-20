@@ -76,6 +76,19 @@ def _store_with_revisions(tmp_path: Path, count: int = 1) -> Store:
     return store
 
 
+def _store_with_topic_pair(tmp_path: Path) -> Store:
+    store = Store(tmp_path / "gaohe.db")
+    store.initialize()
+    for name, url, text in (
+        ("Alpha", "https://alpha.test/forum", "Taipei Defense Ministry forum opens with 100 troops; reported figure."),
+        ("Bravo", "https://bravo.test/forum", "Taipei Defense Ministry forum opens with 1000 troops; reported figure."),
+    ):
+        source_id = store.add_source(Source(None, name, f"{url}/feed"))
+        candidate = ArticleCandidate(source_id, url, "Taipei defense forum", None, "2026-09-20T00:00:00Z", {})
+        store.save_fetched_article(FetchedArticle(candidate, text, "2026-09-20T00:00:00Z", article_content_hash(candidate.title, text)))
+    return store
+
+
 def test_runner_persists_ordinary_claims_without_visible_findings_and_hides_article_text(tmp_path):
     store = _store_with_revisions(tmp_path)
     analysis = FakeAnalysis()
@@ -112,6 +125,39 @@ def test_runner_passes_only_high_confidence_peer_context(tmp_path):
     run_pending_analysis(store, analysis, FakeSearch(), EmptyFetcher(), 10)
 
     assert [len(items) for items in analysis.related] == [1, 1]
+
+
+def test_runner_persists_topic_candidate_for_later_pending_revision(tmp_path):
+    store = _store_with_topic_pair(tmp_path)
+    first = store.list_pending_revisions(1)[0]
+    analysis = FakeAnalysis()
+
+    assert run_pending_analysis(store, analysis, FakeSearch(), EmptyFetcher(), 1)["candidates"] == 1
+    assert store.list_pending_revisions() == [item for item in store.list_recent_revisions() if item.id != first.id]
+
+    summary = run_pending_analysis(store, analysis, FakeSearch(), EmptyFetcher(), 1)
+
+    assert summary == {"claims": 1, "candidates": 1, "visible_findings": 1, "pending": 0, "retrieval_failures": 0}
+    assert len(analysis.related[-1]) == 1
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT finding_type, visible FROM findings ORDER BY id").fetchall() == [
+            ("material_cross_media_difference", 1),
+            ("material_cross_media_difference", 1),
+        ]
+        rows = connection.execute("SELECT relation, status, source_kind, excerpt FROM evidence ORDER BY id").fetchall()
+    assert [(relation, status, source_kind) for relation, status, source_kind, _ in rows] == [
+        ("contradicts", "retrieved", "related_article"),
+        ("contradicts", "retrieved", "related_article"),
+    ]
+    assert all(len(excerpt) <= 2_000 for _, _, _, excerpt in rows)
+
+
+def test_analyze_cli_rejects_unwired_firecrawl_configuration(tmp_path, capsys):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LLM_PROVIDER=gemini\nLLM_MODEL=test\nLLM_API_KEY=key\nWEB_SEARCH_PROVIDER=firecrawl\nFIRECRAWL_API_KEY=key\n", encoding="utf-8")
+
+    assert main(["analyze", "--pending", "--env-file", str(env_file)]) == 2
+    assert capsys.readouterr().err == "error: analyze unavailable\n"
 
 
 def test_analyze_cli_rejects_invalid_limit_and_missing_configuration(tmp_path, capsys):

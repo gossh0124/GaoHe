@@ -78,8 +78,8 @@ GaoHe 只處理已擷取的新聞文本，不產生整篇文章的真假判決�
 - `candidates` 是值得查核的提案，尚未代表錯誤。
 - `visible findings` 必須有可追溯的全文證據與明確關係；沒有搜尋結果、抓取失敗或證據範圍不足時，均維持非可見狀態。
 
-使用 `gaohe analyze --pending [--limit N]` 處理尚未分析的 revision。它只輸出 claims、candidates、visible findings、pending 與 retrieval failures 的統計，不會輸出文章全文、API key 或整篇 verdict。
+使用 `gaohe analyze --pending [--limit N]` 處理尚未分析的 revision。它只輸出 claims、candidates、visible findings、pending 與 retrieval failures 的統計，不會輸出文章全文、API key 或整篇 verdict。它會以本機近期 revision 建立保守的高信心同題 context，讓後加入的文章仍可與先前已完成分析的不同來源文章比較。
 
-搜尋與抓取是兩件不同的事：搜尋只提供發現來源的線索，頁面抓取才取得可留存的本文摘錄；搜尋 snippet 不能單獨形成 visible finding。Firecrawl 僅是直接抓取失敗時可選的 fallback，是否可用仍受使用者自己的 credits、rate limit、403、付費牆與 JavaScript 頁面限制影響。GaoHe 不會繞過登入、付費牆或 CAPTCHA。
+搜尋與抓取是兩件不同的事：搜尋只提供發現來源的線索，頁面抓取才取得可留存的本文摘錄；搜尋 snippet 不能單獨形成 visible finding。目前 `analyze` CLI 僅支援 `WEB_SEARCH_PROVIDER=none` 與直接頁面抓取；設為 `firecrawl` 或其他值會安全地以設定不支援結束（exit 2）。Firecrawl adapter 與設定契約僅為後續接線保留；正式接線前仍須評估使用者自己的 credits、rate limit、403、付費牆、JavaScript、登入與 CAPTCHA 限制。GaoHe 不會繞過登入、付費牆或 CAPTCHA。
 
 每位使用者自行提供 provider key。key 不會提交到 repo，也不會寫入 SQLite 的文章、證據或錯誤資料。CI 僅跑可重現的 fake provider 測試，不連網；CD 目前暫緩。

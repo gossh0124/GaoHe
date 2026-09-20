@@ -7,13 +7,13 @@ from urllib.parse import urlsplit
 
 from . import __version__
 from .config import Settings, load_settings
-from .domain import Source
-from .analysis import analyze_revision, extract_claims
+from .domain import Evidence, Source
+from .analysis import analyze_revision, extract_claims, resolve_finding
 from .monitor import watch_once
 from .providers import AnalysisResult, DirectPageFetcher, build_analysis_provider, build_search_provider
 from .sources import UrllibTransport
-from .storage import Store, redact_url
-from .topics import group_revision
+from .storage import MAX_EVIDENCE_EXCERPT_CHARS, Store, redact_text, redact_url
+from .topics import compare_topic, group_revision
 from .web import serve
 
 
@@ -70,26 +70,50 @@ class _StaticAnalysis:
         return self.result
 
 
+_RECENT_CONTEXT_LIMIT = 100
+
+
+def _topic_evidence(peer) -> Evidence:
+    return Evidence(
+        None, None, redact_url(peer.url), peer.title[:500],
+        redact_text(peer.text, MAX_EVIDENCE_EXCERPT_CHARS), "contradicts", "retrieved",
+        "related_article", peer.fetched_at, "related_revision", None, peer.content_hash,
+    )
+
+
 def run_pending_analysis(store, analysis, search, fetcher, limit: int) -> dict[str, int]:
     """Analyze pending revisions with injected providers and a non-verdict summary."""
     revisions = store.list_pending_revisions(limit)
+    context_pool = store.list_recent_revisions(_RECENT_CONTEXT_LIMIT)
     summary = {"claims": 0, "candidates": 0, "visible_findings": 0, "pending": 0, "retrieval_failures": 0}
     for revision in revisions:
         related = tuple(
-            item for item in revisions
+            item for item in context_pool
             if item.id != revision.id and (topic := group_revision(revision, (item,))) is not None and topic.confidence == "high"
         )
         extracted = extract_claims(revision, analysis, related)
-        resolved = tuple(
+        provider_resolved = tuple(
             analyze_revision(revision, related, _StaticAnalysis(AnalysisResult(revision.id, extracted.claims, (candidate,))), search, fetcher)
             for candidate in extracted.candidates
         )
-        findings = tuple(item.findings[0] for item in resolved)
-        evidence_batches = tuple(item.evidence for item in resolved)
+        topic_pairs = tuple(
+            (candidate, peer)
+            for peer in related
+            for candidate in compare_topic((revision, peer))
+            if candidate.revision_id == revision.id
+        )
+        topic_findings = tuple(
+            resolve_finding(candidate, (_topic_evidence(peer),), (peer,), revision)
+            for candidate, peer in topic_pairs
+        )
+        findings = tuple(item.findings[0] for item in provider_resolved) + topic_findings
+        evidence_batches = tuple(item.evidence for item in provider_resolved) + tuple(
+            (_topic_evidence(peer),) for _, peer in topic_pairs
+        )
         evidence = tuple(item for batch in evidence_batches for item in batch)
         store.save_analysis(revision.id, extracted.claims, findings, evidence_batches)
         summary["claims"] += len(extracted.claims)
-        summary["candidates"] += len(extracted.candidates)
+        summary["candidates"] += len(extracted.candidates) + len(topic_pairs)
         summary["visible_findings"] += sum(item.visible for item in findings)
         summary["pending"] += sum(not item.visible for item in findings)
         summary["retrieval_failures"] += sum(item.status == "retrieval_failed" for item in evidence)
@@ -137,6 +161,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError
             settings = load_settings(args.env_file)
             if settings.validate():
+                raise ValueError
+            if settings.web_search_provider != "none":
                 raise ValueError
             summary = run_pending_analysis(
                 _store(settings),
