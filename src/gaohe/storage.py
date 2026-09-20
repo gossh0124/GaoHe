@@ -14,8 +14,10 @@ from .domain import ArticleRevision, Claim, Evidence, FetchedArticle, Finding, R
 _SENSITIVE_NAME = r"(?:authorization|cookie|token|secret|password|session|api[-_]key)"
 _SENSITIVE_HEADER = re.compile(rf"(?im)^[^\r\n:]*?{_SENSITIVE_NAME}[^\r\n:]*:\s*[^\r\n]*")
 _SENSITIVE_QUERY = re.compile(rf"(?i)([?&][^=&#\s]*{_SENSITIVE_NAME}[^=&#\s]*=)[^&#\s]*")
+_SENSITIVE_FRAGMENT = re.compile(rf"(?i)(^|[?&])([^=&#\s]*{_SENSITIVE_NAME}[^=&#\s]*=)[^&#\s]*")
 _SENSITIVE_VALUE = re.compile(r"(?i)\b(?:api[_-]?key|(?:access|refresh|client)[_-]?(?:token|secret)|token|secret|password|passwd|pwd|session(?:[_-]?id)?)\s*=\s*[^\s,;&]+")
 _BEARER_TOKEN = re.compile(r"(?i)bearer\s+[^\s,;]+")
+_PROVIDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _CLAIM_KINDS = {"checkable", "descriptive"}
 _MATERIALITIES = {"ordinary", "material"}
 _EXTRACTION_STATUSES = {"extracted", "rejected"}
@@ -55,7 +57,12 @@ def redact_url(value: str) -> str:
         (key, "***" if re.search(_SENSITIVE_NAME, key, re.IGNORECASE) else query_value)
         for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
     ])
-    return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, query, parsed.fragment))
+    fragment = _SENSITIVE_FRAGMENT.sub(r"\1\2***", parsed.fragment)
+    return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, query, fragment))
+
+
+def _safe_provider_name(value: str | None) -> str | None:
+    return value if value and _PROVIDER_NAME.fullmatch(value) else None
 
 
 class Store:
@@ -133,6 +140,7 @@ class Store:
             if "title" not in revision_columns:
                 connection.execute("ALTER TABLE article_revisions ADD COLUMN title TEXT")
                 connection.execute("UPDATE article_revisions SET title = (SELECT title FROM articles WHERE articles.id = article_revisions.article_id)")
+            self._normalize_revisions(connection)
             article_columns = {row[1] for row in connection.execute("PRAGMA table_info(articles)")}
             if "current_revision_id" not in article_columns:
                 connection.execute("ALTER TABLE articles ADD COLUMN current_revision_id INTEGER REFERENCES article_revisions(id)")
@@ -204,10 +212,9 @@ class Store:
         indexes = list(connection.execute("PRAGMA index_list(article_revisions)"))
         if not any(index[2] for index in indexes):
             return
-        connection.executescript(
-            """
-            ALTER TABLE article_revisions RENAME TO article_revisions_legacy;
-            CREATE TABLE article_revisions (
+        connection.execute("ALTER TABLE article_revisions RENAME TO article_revisions_legacy")
+        connection.execute(
+            """CREATE TABLE article_revisions (
                 id INTEGER PRIMARY KEY,
                 article_id INTEGER NOT NULL REFERENCES articles(id),
                 title TEXT NOT NULL,
@@ -215,13 +222,36 @@ class Store:
                 fetched_at TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
                 fetch_status TEXT NOT NULL
-            );
-            INSERT INTO article_revisions (id, article_id, title, text, fetched_at, content_hash, fetch_status)
-            SELECT revisions.id, revisions.article_id, articles.title, revisions.text, revisions.fetched_at, revisions.content_hash, revisions.fetch_status
-            FROM article_revisions_legacy AS revisions JOIN articles ON articles.id = revisions.article_id;
-            DROP TABLE article_revisions_legacy;
-            """
+            )"""
         )
+        revisions = connection.execute(
+            """SELECT revisions.id, revisions.article_id, articles.title, revisions.text,
+                      revisions.fetched_at, revisions.fetch_status
+               FROM article_revisions_legacy AS revisions JOIN articles ON articles.id = revisions.article_id"""
+        )
+        connection.executemany(
+            """INSERT INTO article_revisions (id, article_id, title, text, fetched_at, content_hash, fetch_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (revision_id, article_id, *normalize_article_content(title, text), fetched_at,
+                 article_content_hash(title, text), fetch_status)
+                for revision_id, article_id, title, text, fetched_at, fetch_status in revisions
+            ],
+        )
+        connection.execute("DROP TABLE article_revisions_legacy")
+
+    @staticmethod
+    def _normalize_revisions(connection: sqlite3.Connection) -> None:
+        for revision_id, title, text, content_hash in connection.execute(
+            "SELECT id, title, text, content_hash FROM article_revisions"
+        ):
+            normalized_title, normalized_text = normalize_article_content(title, text)
+            normalized_hash = article_content_hash(normalized_title, normalized_text)
+            if (normalized_title, normalized_text, normalized_hash) != (title, text, content_hash):
+                connection.execute(
+                    "UPDATE article_revisions SET title = ?, text = ?, content_hash = ? WHERE id = ?",
+                    (normalized_title, normalized_text, normalized_hash, revision_id),
+                )
 
     def add_source(self, source: Source) -> int:
         with self._connection() as connection:
@@ -372,7 +402,7 @@ class Store:
                 (evidence.finding_id, redact_url(evidence.url),
                  evidence.title if evidence.status == "retrieved" else f"Evidence {evidence.status.replace('_', ' ')}",
                  evidence.excerpt if evidence.status == "retrieved" else "", evidence.relation, evidence.status,
-                 evidence.source_kind, _utc_iso(evidence.retrieved_at) if evidence.retrieved_at else None, evidence.provider,
+                 evidence.source_kind, _utc_iso(evidence.retrieved_at) if evidence.retrieved_at else None, _safe_provider_name(evidence.provider),
                  _utc_iso(evidence.published_at) if evidence.published_at else None, evidence.content_hash),
             )
             return cursor.lastrowid

@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from gaohe.domain import ArticleRevision, Claim, Evidence, Finding, Source, TopicGroup, article_content_hash
-from gaohe.storage import Store
+from gaohe.storage import Store, redact_url
 
 from test_storage import candidate, fetched
 
@@ -87,6 +87,24 @@ def test_failed_evidence_replaces_untrusted_text_and_keeps_successful_evidence(t
     assert rows[1] == ("https://evidence.test/ok", "Public title", "Public excerpt", "provider-a", "2026-09-17T04:00:00Z", "hash-ok")
 
 
+def test_evidence_persists_only_safe_provider_identifiers(tmp_path: Path):
+    store, _ = revision_store(tmp_path)
+
+    store.save_evidence(Evidence(
+        None, None, "https://evidence.test/fail", "Fail", "", "context", "retrieval_failed", "direct",
+        "2026-09-18T04:01:00Z", "Authorization: Bearer secret",
+    ))
+
+    with sqlite3.connect(store.path) as connection:
+        row = connection.execute("SELECT provider FROM evidence").fetchone()
+    assert row == (None,)
+
+
+def test_redact_url_redacts_sensitive_fragments_and_keeps_safe_fragments():
+    assert redact_url("https://evidence.test/article#access_token=secret") == "https://evidence.test/article#access_token=***"
+    assert redact_url("https://evidence.test/article#section-1") == "https://evidence.test/article#section-1"
+
+
 def test_findings_keep_visibility_independent_and_reject_unknown_types_or_statuses(tmp_path: Path):
     store, revision_id = revision_store(tmp_path)
     claim_id = store.save_claims(revision_id, [claim(revision_id)])[0]
@@ -123,27 +141,51 @@ def test_initialize_migrates_old_revisions_before_analysis_foreign_keys(tmp_path
             CREATE TABLE article_revisions (id INTEGER PRIMARY KEY, article_id INTEGER NOT NULL REFERENCES articles(id), text TEXT NOT NULL, fetched_at TEXT NOT NULL, content_hash TEXT NOT NULL, fetch_status TEXT NOT NULL, UNIQUE(article_id, content_hash));
             CREATE TABLE runs (id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT, sources_checked INTEGER NOT NULL, candidates_seen INTEGER NOT NULL, revisions_created INTEGER NOT NULL, failures INTEGER NOT NULL);
             INSERT INTO sources VALUES (1, 'Legacy', 'https://legacy.test/feed', NULL, 1);
-            INSERT INTO articles VALUES (1, 1, 'https://legacy.test/article', 'Legacy title', NULL, '2026-09-18T02:00:00Z', '{}');
-            INSERT INTO article_revisions VALUES (1, 1, 'Legacy text', '2026-09-18T03:00:00Z', 'legacy-hash', 'ok');
+            INSERT INTO articles VALUES (1, 1, 'https://legacy.test/article', 'Café\r\nTitle', NULL, '2026-09-18T02:00:00Z', '{}');
+            INSERT INTO article_revisions VALUES (1, 1, 'Café\r\nBody', '2026-09-18T03:00:00Z', 'legacy-hash', 'ok');
         """)
 
     store = Store(database)
     store.initialize()
     store.initialize()
-    claim_id = store.save_claims(1, [Claim(None, 1, "Legacy", 0, 6, "checkable", "ordinary", "extracted")])[0]
-    finding_id = store.save_finding(Finding(None, 1, claim_id, "factual_contradiction", "Legacy finding", 0, 6, "pending", "pending", False))
+    claim_id = store.save_claims(1, [Claim(None, 1, "Body", 5, 9, "checkable", "ordinary", "extracted")])[0]
+    finding_id = store.save_finding(Finding(None, 1, claim_id, "factual_contradiction", "Legacy finding", 5, 9, "pending", "pending", False))
     evidence_id = store.save_evidence(Evidence(None, finding_id, "https://evidence.test/legacy", "Legacy evidence", "Text", "context", "retrieved", "direct", "2026-09-18T04:00:00Z"))
     topic_id = store.save_topic(TopicGroup(None, "Legacy topic", "high", "active"))
     store.link_revision_to_topic(1, topic_id)
 
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
-        assert connection.execute("SELECT title, text FROM article_revisions WHERE id = 1").fetchone() == ("Legacy title", "Legacy text")
+        assert connection.execute("SELECT title, text, content_hash FROM article_revisions WHERE id = 1").fetchone() == (
+            "Café\nTitle", "Café\nBody", article_content_hash("Café\nTitle", "Café\nBody"),
+        )
         assert connection.execute("SELECT revision_id FROM claims WHERE id = ?", (claim_id,)).fetchone() == (1,)
         assert connection.execute("SELECT finding_id FROM evidence WHERE id = ?", (evidence_id,)).fetchone() == (finding_id,)
         assert connection.execute("SELECT revision_id FROM topic_articles WHERE topic_id = ?", (topic_id,)).fetchone() == (1,)
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute("INSERT INTO claims (revision_id, text, start, end, kind, materiality, extraction_status) VALUES (999, 'x', 0, 1, 'checkable', 'ordinary', 'extracted')")
+
+
+def test_initialize_normalizes_title_column_backfill_revisions(tmp_path: Path):
+    database = tmp_path / "title-backfill.db"
+    with sqlite3.connect(database) as connection:
+        connection.executescript("""
+            CREATE TABLE sources (id INTEGER PRIMARY KEY, name TEXT NOT NULL, feed_url TEXT NOT NULL UNIQUE, article_url TEXT, enabled INTEGER NOT NULL);
+            CREATE TABLE articles (id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL REFERENCES sources(id), url TEXT NOT NULL UNIQUE, title TEXT NOT NULL, published_at TEXT, discovered_at TEXT NOT NULL, metadata_json TEXT NOT NULL);
+            CREATE TABLE article_revisions (id INTEGER PRIMARY KEY, article_id INTEGER NOT NULL REFERENCES articles(id), text TEXT NOT NULL, fetched_at TEXT NOT NULL, content_hash TEXT NOT NULL, fetch_status TEXT NOT NULL);
+            INSERT INTO sources VALUES (1, 'Legacy', 'https://legacy.test/feed', NULL, 1);
+            INSERT INTO articles VALUES (1, 1, 'https://legacy.test/article', 'Café\r\nTitle', NULL, '2026-09-18T02:00:00Z', '{}');
+            INSERT INTO article_revisions VALUES (1, 1, 'Café\r\nBody', '2026-09-18T03:00:00Z', 'legacy-hash', 'ok');
+        """)
+
+    store = Store(database)
+    store.initialize()
+
+    revision = store.list_pending_revisions()[0]
+    assert (revision.title, revision.text, revision.content_hash) == (
+        "Café\nTitle", "Café\nBody", article_content_hash("Café\nTitle", "Café\nBody"),
+    )
+    assert store.save_claims(1, [Claim(None, 1, "Body", 5, 9, "checkable", "ordinary", "extracted")]) == [1]
 
 
 def test_revision_keeps_normalized_title_and_text_after_candidate_metadata_update(tmp_path: Path):
