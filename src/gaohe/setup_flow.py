@@ -133,9 +133,9 @@ def _page(state: SetupState, errors: tuple[str, ...] = (), complete: bool = Fals
         return "<!doctype html><meta charset='utf-8'><title>GaoHe setup complete</title><main><h1>GaoHe is ready</h1><p>Your local settings and media source were saved. You can close this tab.</p></main>"
     return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><title>GaoHe setup</title></head><body><main>
 <h1>Set up GaoHe on this computer</h1>
-<p>Each person who downloads GaoHe enters their own AI key. This repository does not share a cloud account. Provider quota, terms, and rate limits belong to that person's account.</p>
+<p>Each person who downloads GaoHe enters their own Gemini API key. This repository does not share a cloud account. Gemini quota, terms, and rate limits belong to that person's account. Other AI providers are planned for future releases.</p>
 <p>Local readiness: AI key {key_state}; media sources {state.source_count}.</p>{error_html}
-<form method='post'><label>AI provider <input name='provider' required></label><br><label>Model <input name='model' required></label><br><label>AI API key <input name='api_key' type='password' required autocomplete='off'></label><br><label>Media name <input name='media_name' required></label><br><label>RSS or list URL <input name='source_url' type='url' required></label><br><button type='submit'>Save local setup</button></form>
+<form method='post'><label>AI provider <input name='provider' value='gemini' readonly aria-readonly='true' required> Gemini (currently supported)</label><br><label>Model <input name='model' required></label><br><label>Gemini API key <input name='api_key' type='password' required autocomplete='off'></label><br><label>Media name <input name='media_name' required></label><br><label>RSS or list URL <input name='source_url' type='url' required></label><br><button type='submit'>Save local setup</button></form>
 </main></body></html>"""
 
 

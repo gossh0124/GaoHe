@@ -21,7 +21,9 @@ def test_setup_script_gates_python_before_creating_a_venv_and_launches_wizard():
     text = _text("scripts/setup.ps1")
 
     assert "Get-Command py" in text
-    assert "py -3.11" in text
+    assert '& py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"' in text
+    assert '$PythonArguments = @("-3")' in text
+    assert "py -3.11" not in text
     assert "Get-Command python" in text
     assert "https://www.python.org/downloads/windows/" in text
     assert text.index("if ($null -eq $PythonExecutable)") < text.index("-m venv")
@@ -61,7 +63,8 @@ def test_uninstall_requires_typed_confirmation_before_optional_deletion():
     assert "Resolved configuration path:" in text
     assert "Resolved data path:" in text
     assert text.index("if ($Confirmation -ne $RequiredConfirmation)") < text.index("Remove-Item -LiteralPath $EnvFile")
-    assert text.index("if ($Confirmation -ne $RequiredConfirmation)") < text.index("Remove-Item -LiteralPath $DataDir")
+    assert text.index("if ($Confirmation -ne $RequiredConfirmation)") < text.index("Assert-AllowedDataPath $DataDir")
+    assert text.index("Assert-AllowedDataPath $DataDir") < text.index("Remove-Item -LiteralPath $AllowedDataDir")
 
 
 def test_uninstall_never_targets_the_repository_or_unresolved_broad_paths():
@@ -71,3 +74,13 @@ def test_uninstall_never_targets_the_repository_or_unresolved_broad_paths():
     assert "Resolve-Path -LiteralPath $ProjectDir" in text
     assert "Remove-Item -LiteralPath $ProjectDir -Recurse" not in text
     assert "Remove-Item -Recurse -Force $ProjectDir" not in text
+
+
+def test_uninstall_optional_data_deletion_is_limited_to_controlled_paths_and_not_reparse_points():
+    text = _text("scripts/uninstall.ps1")
+
+    assert "Assert-AllowedDataPath" in text
+    assert "LocalApplicationData" in text
+    assert "StartsWith($resolvedProject" in text
+    assert "ReparsePoint" in text
+    assert "Assert-AllowedDataPath $DataDir" in text

@@ -18,10 +18,10 @@ if (-not (Test-Path -LiteralPath $ProjectDir -PathType Container)) {
 $PythonExecutable = $null
 $PythonArguments = @()
 if (Get-Command py -ErrorAction SilentlyContinue) {
-    & py -3.11 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+    & py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
     if ($LASTEXITCODE -eq 0) {
         $PythonExecutable = "py"
-        $PythonArguments = @("-3.11")
+        $PythonArguments = @("-3")
     }
 }
 if ($null -eq $PythonExecutable -and (Get-Command python -ErrorAction SilentlyContinue)) {

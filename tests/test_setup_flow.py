@@ -9,7 +9,7 @@ import pytest
 import gaohe.setup_flow as setup_flow
 from gaohe.config import Settings
 from gaohe.domain import Source
-from gaohe.setup_flow import SetupState, _handler, setup_state, validate_setup_form, write_setup_config
+from gaohe.setup_flow import SetupState, _handler, _page, setup_state, validate_setup_form, write_setup_config
 from gaohe.storage import Store
 
 
@@ -139,3 +139,10 @@ def test_setup_state_masks_key_and_source_registration_is_idempotent(tmp_path):
 
     assert state == SetupState(True, True, 1, ())
     assert "private-key" not in repr(state)
+
+
+def test_setup_page_identifies_gemini_as_the_only_current_provider():
+    page = _page(SetupState(False, False, 0, ()))
+
+    assert "Gemini (currently supported)" in page
+    assert "Other AI providers are planned for future releases." in page

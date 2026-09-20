@@ -43,6 +43,28 @@ function Get-ConfiguredDataDir([string]$EnvFile) {
     return $resolved
 }
 
+function Assert-AllowedDataPath([string]$Path) {
+    $defaultBase = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    $defaultData = [IO.Path]::GetFullPath((Join-Path $defaultBase "GaoHe"))
+    $resolvedProject = $ProjectDir.TrimEnd('\\') + '\\'
+    if ($Path -ne $defaultData -and -not $Path.StartsWith($resolvedProject, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing data deletion outside the controlled GaoHe locations."
+    }
+    $current = $Path
+    while ($true) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing to delete a reparse-point path."
+            }
+        }
+        $parent = [IO.Directory]::GetParent($current)
+        if ($null -eq $parent -or $parent.FullName -eq $current) { break }
+        $current = $parent.FullName
+    }
+    return $Path
+}
+
 $ProjectDir = (Resolve-Path -LiteralPath $ProjectDir).Path
 $EnvFile = Assert-ProjectLocalPath (Join-Path $ProjectDir ".env")
 $VenvDir = Assert-ProjectLocalPath (Join-Path $ProjectDir ".venv")
@@ -66,6 +88,7 @@ if ($DeleteConfig -or $DeleteData) {
         Remove-Item -LiteralPath $EnvFile -Force
     }
     if ($DeleteData -and (Test-Path -LiteralPath $DataDir -PathType Container)) {
-        Remove-Item -LiteralPath $DataDir -Recurse -Force
+        $AllowedDataDir = Assert-AllowedDataPath $DataDir
+        Remove-Item -LiteralPath $AllowedDataDir -Recurse -Force
     }
 }

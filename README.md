@@ -8,11 +8,11 @@
 
 這個 repo 是依專案規格建立的新基線。先前提到的外部 `berhen5888/GaoHe` repo 與功能分支目前無法取得，因此本次內容不宣稱恢復了既有實作。
 
-目前提供 Windows 原生的監測基礎：來源清單、RSS／列表／sitemap 探索、文章 metadata 與內容版本的本機 SQLite 紀錄、一次性監測命令、本機 status page、首次設定精靈與使用者層級排程。`analyze --pending` 已提供本機的 provider-neutral 分析、證據狀態與保守同題 context。
+目前提供 Windows 原生的監測基礎：來源清單、RSS／列表／sitemap 探索、文章 metadata 與內容版本的本機 SQLite 紀錄、一次性監測命令、本機 status page、首次設定精靈與使用者層級排程。`analyze --pending` 目前使用 Gemini 分析，提供證據狀態與保守同題 context；其他 AI provider 尚未實作。
 
 ## 一般 Windows 使用者：GitHub Release ZIP
 
-從 GitHub Release 下載並完整解壓縮 ZIP；不需要 Git。電腦需先安裝 Python 3.11 或更新版本。雙擊 `setup.cmd`，它會建立（或重用）此資料夾內的 `.venv`、以本機套件啟動設定精靈，並在瀏覽器要求輸入**自己的** AI provider/key、模型與至少一個媒體 RSS／列表網址。每位下載者各自使用自己的帳號、額度與條款，key 僅保留在本機 `.env`。
+從 GitHub Release 下載並完整解壓縮 ZIP；不需要 Git。電腦需先安裝 Python 3.11 或更新版本。雙擊 `setup.cmd`，它會建立（或重用）此資料夾內的 `.venv`、以本機套件啟動設定精靈，並在瀏覽器要求輸入**自己的 Gemini API key**、模型與至少一個媒體 RSS／列表網址。目前僅支援 Gemini；其他 AI provider 是後續工作。每位下載者各自使用自己的帳號、額度與條款，key 僅保留在本機 `.env`。
 
 完成精靈後，可在 PowerShell 於解壓縮資料夾執行：
 
@@ -42,10 +42,10 @@ py -3.11 -m venv .venv
 Copy-Item .env.example .env
 ```
 
-目前的來源監測不會呼叫 AI 或搜尋服務；可先保留 provider 設定空白。日後若加入需要 AI 的功能，再設定 provider-neutral 的 `LLM_PROVIDER`、`LLM_MODEL` 與 `LLM_API_KEY`：
+目前的來源監測不會呼叫 AI 或搜尋服務；可先保留 provider 設定空白。若要使用現有分析功能，設定目前唯一支援的 Gemini `LLM_PROVIDER`、`LLM_MODEL` 與 `LLM_API_KEY`：
 
 ```dotenv
-LLM_PROVIDER=
+LLM_PROVIDER=gemini
 LLM_MODEL=
 LLM_API_KEY=
 WEB_SEARCH_PROVIDER=none
