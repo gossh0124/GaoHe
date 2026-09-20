@@ -8,7 +8,7 @@
 
 這個 repo 是依專案規格建立的新基線。先前提到的外部 `berhen5888/GaoHe` repo 與功能分支目前無法取得，因此本次內容不宣稱恢復了既有實作。
 
-目前提供 Windows 原生的監測基礎：來源清單、RSS／列表／sitemap 探索、文章 metadata 與內容版本的本機 SQLite 紀錄、一次性監測命令及本機 status page。AI 分析、搜尋／Firecrawl、證據對照、標註、同題分組、使用者介面與排程尚未實作。
+目前提供 Windows 原生的監測基礎：來源清單、RSS／列表／sitemap 探索、文章 metadata 與內容版本的本機 SQLite 紀錄、一次性監測命令及本機 status page。`analyze --pending` 已提供本機的 provider-neutral 分析、證據狀態與保守同題 context；標註使用者介面與排程仍未實作。
 
 ## Windows 原生安裝
 
@@ -39,6 +39,7 @@ WEB_SEARCH_PROVIDER=none
 & .\.venv\Scripts\python.exe -m gaohe source add --name "Example News" --feed-url "https://example.test/feed.xml" --env-file .env
 & .\.venv\Scripts\python.exe -m gaohe source list --env-file .env
 & .\.venv\Scripts\python.exe -m gaohe watch --once --env-file .env
+& .\.venv\Scripts\python.exe -m gaohe analyze --pending --limit 20 --env-file .env
 & .\.venv\Scripts\python.exe -m gaohe serve --port 8000
 ```
 
@@ -67,3 +68,18 @@ CD 暫緩。尚未選定部署平台、部署憑證、健康檢查或回滾策�
 - 穩定分支是 `main`，功能分支使用 `codex/` 前綴。
 - `.env`、`.venv`、本地資料庫、快照與報告輸出均列入 `.gitignore`。
 - 真實 API smoke test 只在使用者本機手動選擇執行；測試輸出不可包含 secret。
+# GaoHe
+
+## 稿後複驗的證據模型
+
+GaoHe 只處理已擷取的新聞文本，不產生整篇文章的真假判決或媒體評分。結果分成三層：
+
+- `claims` 是從原文擷取、帶有精確文字位置的可檢視陳述。
+- `candidates` 是值得查核的提案，尚未代表錯誤。
+- `visible findings` 必須有可追溯的全文證據與明確關係；沒有搜尋結果、抓取失敗或證據範圍不足時，均維持非可見狀態。
+
+使用 `gaohe analyze --pending [--limit N]` 處理尚未分析的 revision。它只輸出 claims、candidates、visible findings、pending 與 retrieval failures 的統計，不會輸出文章全文、API key 或整篇 verdict。
+
+搜尋與抓取是兩件不同的事：搜尋只提供發現來源的線索，頁面抓取才取得可留存的本文摘錄；搜尋 snippet 不能單獨形成 visible finding。Firecrawl 僅是直接抓取失敗時可選的 fallback，是否可用仍受使用者自己的 credits、rate limit、403、付費牆與 JavaScript 頁面限制影響。GaoHe 不會繞過登入、付費牆或 CAPTCHA。
+
+每位使用者自行提供 provider key。key 不會提交到 repo，也不會寫入 SQLite 的文章、證據或錯誤資料。CI 僅跑可重現的 fake provider 測試，不連網；CD 目前暫緩。

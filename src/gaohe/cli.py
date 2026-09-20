@@ -8,9 +8,12 @@ from urllib.parse import urlsplit
 from . import __version__
 from .config import Settings, load_settings
 from .domain import Source
+from .analysis import analyze_revision, extract_claims
 from .monitor import watch_once
+from .providers import AnalysisResult, DirectPageFetcher, build_analysis_provider, build_search_provider
 from .sources import UrllibTransport
 from .storage import Store, redact_url
+from .topics import group_revision
 from .web import serve
 
 
@@ -27,6 +30,10 @@ def build_parser() -> argparse.ArgumentParser:
     watch = commands.add_parser("watch")
     watch.add_argument("--once", action="store_true", required=True)
     watch.add_argument("--env-file", type=Path, default=Path(".env"))
+    analyze = commands.add_parser("analyze")
+    analyze.add_argument("--pending", action="store_true", required=True)
+    analyze.add_argument("--limit", default="20")
+    analyze.add_argument("--env-file", type=Path, default=Path(".env"))
     source = commands.add_parser("source")
     source_commands = source.add_subparsers(dest="source_command", required=True)
     add = source_commands.add_parser("add")
@@ -52,6 +59,41 @@ def _store(settings: Settings) -> Store:
 def _is_http_url(value: str) -> bool:
     parsed = urlsplit(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+class _StaticAnalysis:
+    def __init__(self, result: AnalysisResult) -> None:
+        self.result = result
+
+    def analyze(self, revision, related):
+        del revision, related
+        return self.result
+
+
+def run_pending_analysis(store, analysis, search, fetcher, limit: int) -> dict[str, int]:
+    """Analyze pending revisions with injected providers and a non-verdict summary."""
+    revisions = store.list_pending_revisions(limit)
+    summary = {"claims": 0, "candidates": 0, "visible_findings": 0, "pending": 0, "retrieval_failures": 0}
+    for revision in revisions:
+        related = tuple(
+            item for item in revisions
+            if item.id != revision.id and (topic := group_revision(revision, (item,))) is not None and topic.confidence == "high"
+        )
+        extracted = extract_claims(revision, analysis, related)
+        resolved = tuple(
+            analyze_revision(revision, related, _StaticAnalysis(AnalysisResult(revision.id, extracted.claims, (candidate,))), search, fetcher)
+            for candidate in extracted.candidates
+        )
+        findings = tuple(item.findings[0] for item in resolved)
+        evidence_batches = tuple(item.evidence for item in resolved)
+        evidence = tuple(item for batch in evidence_batches for item in batch)
+        store.save_analysis(revision.id, extracted.claims, findings, evidence_batches)
+        summary["claims"] += len(extracted.claims)
+        summary["candidates"] += len(extracted.candidates)
+        summary["visible_findings"] += sum(item.visible for item in findings)
+        summary["pending"] += sum(not item.visible for item in findings)
+        summary["retrieval_failures"] += sum(item.status == "retrieval_failed" for item in evidence)
+    return summary
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -87,6 +129,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"checked={summary.sources_checked} candidates={summary.candidates_seen} "
             f"revisions={summary.revisions_created} failures={summary.failures}"
         )
+        return 0
+    if args.command == "analyze":
+        try:
+            limit = int(args.limit)
+            if limit < 1:
+                raise ValueError
+            settings = load_settings(args.env_file)
+            if settings.validate():
+                raise ValueError
+            summary = run_pending_analysis(
+                _store(settings),
+                build_analysis_provider(settings),
+                build_search_provider(settings),
+                DirectPageFetcher(UrllibTransport()),
+                limit,
+            )
+        except (OSError, ValueError, sqlite3.Error):
+            print("error: analyze unavailable", file=sys.stderr)
+            return 2
+        print(" ".join(f"{key}={value}" for key, value in summary.items()))
         return 0
     if args.command == "source":
         if args.source_command == "add":

@@ -370,41 +370,49 @@ class Store:
 
     def save_claims(self, revision_id: int, claims: Sequence[Claim]) -> list[int]:
         with self._connection() as connection:
-            revision = self._revision(connection, revision_id)
-            if revision is None:
-                raise ValueError("unknown revision")
-            claim_ids = []
-            for claim in claims:
-                if claim.revision_id != revision_id:
-                    raise ValueError("claim revision_id must match revision_id")
-                if not 0 <= claim.start <= claim.end <= len(revision.text):
-                    raise ValueError("claim span is outside the normalized article text")
-                _require_allowed("claim kind", claim.kind, CLAIM_KINDS)
-                _require_allowed("claim materiality", claim.materiality, CLAIM_MATERIALITIES)
-                _require_allowed("claim extraction_status", claim.extraction_status, CLAIM_EXTRACTION_STATUSES)
-                try:
-                    cursor = connection.execute(
-                        """INSERT INTO claims (revision_id, text, start, end, kind, materiality, extraction_status)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (revision_id, claim.text, claim.start, claim.end, claim.kind, claim.materiality, claim.extraction_status),
-                    )
-                except sqlite3.IntegrityError as error:
-                    if "claims.revision_id, claims.start, claims.end" in str(error):
-                        raise ValueError("duplicate claim span") from error
-                    raise
-                claim_ids.append(cursor.lastrowid)
+            claim_ids = self._save_claims(connection, revision_id, claims)
             connection.execute(
                 "INSERT INTO revision_analysis (revision_id, status) VALUES (?, 'completed') ON CONFLICT(revision_id) DO UPDATE SET status = excluded.status",
                 (revision_id,),
             )
             return claim_ids
 
+    def _save_claims(self, connection: sqlite3.Connection, revision_id: int, claims: Sequence[Claim]) -> list[int]:
+        revision = self._revision(connection, revision_id)
+        if revision is None:
+            raise ValueError("unknown revision")
+        claim_ids = []
+        for claim in claims:
+            if claim.revision_id != revision_id:
+                raise ValueError("claim revision_id must match revision_id")
+            if not 0 <= claim.start <= claim.end <= len(revision.text):
+                raise ValueError("claim span is outside the normalized article text")
+            _require_allowed("claim kind", claim.kind, CLAIM_KINDS)
+            _require_allowed("claim materiality", claim.materiality, CLAIM_MATERIALITIES)
+            _require_allowed("claim extraction_status", claim.extraction_status, CLAIM_EXTRACTION_STATUSES)
+            try:
+                cursor = connection.execute(
+                    """INSERT INTO claims (revision_id, text, start, end, kind, materiality, extraction_status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (revision_id, claim.text, claim.start, claim.end, claim.kind, claim.materiality, claim.extraction_status),
+                )
+            except sqlite3.IntegrityError as error:
+                if "claims.revision_id, claims.start, claims.end" in str(error):
+                    raise ValueError("duplicate claim span") from error
+                raise
+            claim_ids.append(cursor.lastrowid)
+        return claim_ids
+
     def save_evidence(self, evidence: Evidence) -> int:
+        with self._connection() as connection:
+            return self._save_evidence(connection, evidence)
+
+    @staticmethod
+    def _save_evidence(connection: sqlite3.Connection, evidence: Evidence) -> int:
         _require_allowed("evidence relation", evidence.relation, _EVIDENCE_RELATIONS)
         _require_allowed("evidence status", evidence.status, _EVIDENCE_STATUSES)
         _require_allowed("evidence source_kind", evidence.source_kind, _EVIDENCE_SOURCE_KINDS)
-        with self._connection() as connection:
-            cursor = connection.execute(
+        cursor = connection.execute(
                 """INSERT INTO evidence (finding_id, url, title, excerpt, relation, status, source_kind, retrieved_at, provider, published_at, content_hash)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (evidence.finding_id, redact_url(evidence.url),
@@ -412,30 +420,55 @@ class Store:
                  redact_text(evidence.excerpt) if evidence.status == "retrieved" else "", evidence.relation, evidence.status,
                  evidence.source_kind, _utc_iso(evidence.retrieved_at) if evidence.retrieved_at else None, _safe_provider_name(evidence.provider),
                  _utc_iso(evidence.published_at) if evidence.published_at else None, evidence.content_hash),
-            )
-            return cursor.lastrowid
+        )
+        return cursor.lastrowid
 
     def save_finding(self, finding: Finding) -> int:
+        with self._connection() as connection:
+            return self._save_finding(connection, finding)
+
+    def _save_finding(self, connection: sqlite3.Connection, finding: Finding) -> int:
         _require_allowed("finding_type", finding.finding_type, _FINDING_TYPES)
         _require_allowed("finding status", finding.status, _FINDING_STATUSES)
         _require_allowed("finding evidence_status", finding.evidence_status, _EVIDENCE_STATUSES)
-        with self._connection() as connection:
-            revision = self._revision(connection, finding.revision_id)
-            if revision is None:
-                raise ValueError("unknown revision")
-            if not 0 <= finding.start <= finding.end <= len(revision.text):
-                raise ValueError("finding span is outside the normalized article text")
-            if finding.claim_id is not None:
-                row = connection.execute("SELECT revision_id FROM claims WHERE id = ?", (finding.claim_id,)).fetchone()
-                if row is None or row[0] != finding.revision_id:
-                    raise ValueError("finding claim must belong to its revision")
-            cursor = connection.execute(
+        revision = self._revision(connection, finding.revision_id)
+        if revision is None:
+            raise ValueError("unknown revision")
+        if not 0 <= finding.start <= finding.end <= len(revision.text):
+            raise ValueError("finding span is outside the normalized article text")
+        if finding.claim_id is not None:
+            row = connection.execute("SELECT revision_id FROM claims WHERE id = ?", (finding.claim_id,)).fetchone()
+            if row is None or row[0] != finding.revision_id:
+                raise ValueError("finding claim must belong to its revision")
+        cursor = connection.execute(
                 """INSERT INTO findings (revision_id, claim_id, finding_type, summary, start, end, status, evidence_status, visible)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (finding.revision_id, finding.claim_id, finding.finding_type, finding.summary, finding.start, finding.end,
                  finding.status, finding.evidence_status, int(finding.visible)),
+        )
+        return cursor.lastrowid
+
+    def save_analysis(self, revision_id: int, claims: Sequence[Claim], findings: Sequence[Finding], evidence: Sequence[Sequence[Evidence]]) -> None:
+        """Persist one completed analysis batch in a single SQLite transaction."""
+        with self._connection() as connection:
+            claim_ids = self._save_claims(connection, revision_id, claims)
+            by_span = {(claim.start, claim.end): claim_id for claim, claim_id in zip(claims, claim_ids)}
+            by_provider_id = {claim.id: claim_id for claim, claim_id in zip(claims, claim_ids) if claim.id is not None}
+            finding_ids = []
+            for finding in findings:
+                if finding.revision_id != revision_id:
+                    raise ValueError("finding revision_id must match revision_id")
+                claim_id = by_provider_id.get(finding.claim_id, by_span.get((finding.start, finding.end)))
+                finding_ids.append(self._save_finding(connection, replace(finding, claim_id=claim_id)))
+            if len(evidence) != len(finding_ids):
+                raise ValueError("evidence batches must match findings")
+            for finding_id, batch in zip(finding_ids, evidence):
+                for item in batch:
+                    self._save_evidence(connection, replace(item, finding_id=finding_id))
+            connection.execute(
+                "INSERT INTO revision_analysis (revision_id, status) VALUES (?, 'completed') ON CONFLICT(revision_id) DO UPDATE SET status = excluded.status",
+                (revision_id,),
             )
-            return cursor.lastrowid
 
     def link_revision_to_topic(self, revision_id: int, topic_id: int) -> None:
         with self._connection() as connection:
