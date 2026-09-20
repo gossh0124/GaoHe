@@ -17,6 +17,8 @@ _ENTITY = re.compile(r"\b[A-Z][a-z]{2,}\b|[\u4e00-\u9fff]{1,7}(?:部|局|會|院
 _NUMBER = re.compile(r"(?<![\w,])(\d[\d,]*)(?:\s*)([%A-Za-z]+|[\u4e00-\u9fff]{1,4})?")
 _APPROXIMATE = re.compile(r"(?:about|around|approximately|roughly|nearly|over|under|約|近|逾|超過)\s*$", re.IGNORECASE)
 _OPPOSITES = (("approved", "rejected"), ("opened", "closed"), ("confirmed", "denied"), ("arrested", "released"), ("批准", "否決"), ("開放", "關閉"), ("確認", "否認"), ("逮捕", "釋放"))
+_STOPWORDS = {"a", "an", "and", "after", "at", "by", "for", "from", "in", "of", "on", "or", "the", "that", "this", "to", "with", "reported", "reports", "said", "says"}
+_DATE_UNITS = {"am", "pm", "day", "days", "hour", "hours", "month", "months", "year", "years"}
 
 
 def _tokens(value: str) -> set[str]:
@@ -25,6 +27,11 @@ def _tokens(value: str) -> set[str]:
 
 def _entities(value: str) -> set[str]:
     return {item.casefold() for item in _ENTITY.findall(value)}
+
+
+def _event_tokens(value: str, *, units: set[str] = set(), opposites: set[str] = set()) -> set[str]:
+    tokens = _tokens(value)
+    return tokens - _entities(value) - _STOPWORDS - units - opposites - {item for item in tokens if item.replace(",", "").isdigit()}
 
 
 def _host(url: str) -> str:
@@ -58,13 +65,13 @@ def _within_window(left: ArticleRevision, right: ArticleRevision) -> bool:
 
 
 def _pair_confidence(left: ArticleRevision, right: ArticleRevision) -> str | None:
-    if _safe_url(left.url) == _safe_url(right.url) or not _within_window(left, right):
+    left_url, right_url = _safe_url(left.url), _safe_url(right.url)
+    if not left_url or not right_url or left_url == right_url or not _within_window(left, right):
         return None
-    shared_entities = _entities(left.title + " " + left.text) & _entities(right.title + " " + right.text)
-    shared_tokens = _tokens(left.title + " " + left.text) & _tokens(right.title + " " + right.text)
-    shared_events = shared_tokens - shared_entities - {"the", "and", "with", "from", "that", "this"}
-    shared_numbers = {item for item in shared_tokens if item.replace(",", "").isdigit()}
-    if _host(left.url) != _host(right.url) and shared_entities and shared_events and (len(shared_events) >= 2 or shared_numbers):
+    shared_entities = (_entities(left.title + " " + left.text) - _STOPWORDS) & (_entities(right.title + " " + right.text) - _STOPWORDS)
+    shared_events = _event_tokens(left.title + " " + left.text) & _event_tokens(right.title + " " + right.text)
+    shared_body_events = _event_tokens(left.text) & _event_tokens(right.text)
+    if _host(left_url) != _host(right_url) and shared_entities and len(shared_events) >= 2 and shared_body_events:
         return "high"
     if shared_events:
         return "possible"
@@ -94,40 +101,52 @@ def _sentence(text: str, start: int, end: int) -> str:
     return text[left:min(right_positions) if right_positions else len(text)]
 
 
-def _numeric_claims(text: str) -> list[tuple[int, int, int, str, str]]:
-    claims: list[tuple[int, int, int, str, str]] = []
+def _numeric_claims(text: str) -> list[tuple[int, int, int, str, str, str]]:
+    claims: list[tuple[int, int, int, str, str, str]] = []
     for match in _NUMBER.finditer(text):
         before = text[max(0, match.start() - 20):match.start()]
         if _APPROXIMATE.search(before):
             continue
         value = int(match.group(1).replace(",", ""))
         phrase = match.group(0).strip()
-        if not value or not match.group(2):
+        unit = (match.group(2) or "").casefold()
+        if not value or not unit or unit in _DATE_UNITS:
             continue
-        claims.append((match.start(), match.end(), value, phrase, _sentence(text, match.start(), match.end())))
+        claims.append((match.start(), match.end(), value, phrase, unit, _sentence(text, match.start(), match.end())))
     return claims
 
 
 def _numeric_difference(left: ArticleRevision, right: ArticleRevision) -> tuple[int, int, str, str] | None:
-    for start, end, value, phrase, context in _numeric_claims(left.text):
-        context_tokens = _tokens(context) - {str(value)}
-        for _, _, other_value, other_phrase, other_context in _numeric_claims(right.text):
-            if value == other_value or not (context_tokens & _tokens(other_context)):
+    for start, end, value, phrase, unit, context in _numeric_claims(left.text):
+        left_events = _event_tokens(context, units={unit})
+        left_entities = _entities(context) - _STOPWORDS
+        for _, _, other_value, other_phrase, other_unit, other_context in _numeric_claims(right.text):
+            if value == other_value or unit != other_unit:
                 continue
-            if int(math.log10(value)) != int(math.log10(other_value)):
+            right_events = _event_tokens(other_context, units={other_unit})
+            right_entities = _entities(other_context) - _STOPWORDS
+            if left_entities & right_entities and len(left_events & right_events) >= 2 and int(math.log10(value)) != int(math.log10(other_value)):
                 return start, end, phrase, other_phrase
     return None
 
 
 def _opposite_difference(left: ArticleRevision, right: ArticleRevision) -> tuple[int, int, str, str] | None:
     left_text, right_text = left.text.casefold(), right.text.casefold()
+    opposite_words = {word for pair in _OPPOSITES for word in pair}
     for first, second in _OPPOSITES:
-        if first in left_text and second in right_text:
-            start = left_text.index(first)
-            return start, start + len(first), first, second
-        if second in left_text and first in right_text:
-            start = left_text.index(second)
-            return start, start + len(second), second, first
+        for left_word, right_word in ((first, second), (second, first)):
+            start = left_text.find(left_word)
+            while start != -1:
+                left_context = _sentence(left.text, start, start + len(left_word))
+                left_entities = _entities(left_context) - _STOPWORDS
+                left_events = _event_tokens(left_context, opposites=opposite_words)
+                right_start = right_text.find(right_word)
+                while right_start != -1:
+                    right_context = _sentence(right.text, right_start, right_start + len(right_word))
+                    if (left_entities & (_entities(right_context) - _STOPWORDS)) and (left_events & _event_tokens(right_context, opposites=opposite_words)):
+                        return start, start + len(left_word), left_word, right_word
+                    right_start = right_text.find(right_word, right_start + len(right_word))
+                start = left_text.find(left_word, start + len(left_word))
     return None
 
 

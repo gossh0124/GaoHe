@@ -43,6 +43,28 @@ def test_group_revision_does_not_group_articles_that_only_share_a_person():
     assert group_revision(incoming, (existing,)) is None
 
 
+def test_group_revision_does_not_promote_person_title_and_number_overlap_to_high():
+    from gaohe.topics import group_revision
+
+    existing = revision(1, "https://alpha.test/a", "Chen summit 2026", "Chen visited a hospital after the storm.")
+    incoming = revision(2, "https://bravo.test/b", "Chen summit 2026", "Chen discussed a budget at city hall.")
+
+    topic = group_revision(incoming, (existing,))
+
+    assert topic is None or topic.confidence != "high"
+
+
+def test_group_revision_does_not_promote_matching_titles_without_body_event_anchors():
+    from gaohe.topics import group_revision
+
+    existing = revision(1, "https://alpha.test/a", "Taipei security summit", "Officials discussed hospital staffing.")
+    incoming = revision(2, "https://bravo.test/b", "Taipei security summit", "Residents cleaned storm damage.")
+
+    topic = group_revision(incoming, (existing,))
+
+    assert topic is None or topic.confidence != "high"
+
+
 def test_group_revision_never_treats_an_updated_same_url_as_cross_media_peer():
     from gaohe.topics import group_revision
 
@@ -81,8 +103,8 @@ def test_compare_topic_returns_a_bounded_material_numeric_difference_with_source
     from gaohe.providers import MAX_QUERY_CHARS
     from gaohe.topics import compare_topic
 
-    primary = revision(1, "https://alpha.test/forum?token=secret", "Taipei defense forum", "Taipei Defense Ministry reports 100 troops deployed.")
-    peer = revision(2, "https://bravo.test/forum", "Taipei security forum", "Taipei Defense Ministry reports 1000 troops deployed.", "2026-09-20T13:00:00Z")
+    primary = revision(1, "https://alpha.test/forum?token=secret", "Taipei defense forum", "Taipei Defense Ministry reports 100 troops deployed at the coastal exercise.")
+    peer = revision(2, "https://bravo.test/forum", "Taipei security forum", "Taipei Defense Ministry reports 1000 troops deployed at the coastal exercise.", "2026-09-20T13:00:00Z")
 
     candidates = compare_topic((primary, peer))
 
@@ -97,6 +119,56 @@ def test_compare_topic_returns_a_bounded_material_numeric_difference_with_source
     assert "https://bravo.test/forum" in candidate.summary
     assert "secret" not in candidate.summary + (candidate.query or "")
     assert candidate.query is not None and len(candidate.query) <= MAX_QUERY_CHARS
+
+
+def test_compare_topic_requires_matching_numeric_units_and_local_event_context():
+    from gaohe.topics import compare_topic
+
+    troops = revision(1, "https://alpha.test/a", "Taipei defense forum", "Taipei Defense Ministry reports 100 troops deployed at the coastal exercise.")
+    delegates = revision(2, "https://bravo.test/b", "Taipei security forum", "Taipei Defense Ministry reports 1000 delegates deployed at the coastal exercise.")
+    different_event = revision(3, "https://charlie.test/c", "Taipei defense forum", "Taipei Defense Ministry reports 1000 troops deployed after the storm.")
+
+    assert compare_topic((troops, delegates)) == []
+    assert compare_topic((troops, different_event)) == []
+
+
+def test_compare_topic_ignores_years_and_dates():
+    from gaohe.topics import compare_topic
+
+    left = revision(1, "https://alpha.test/a", "Taipei defense forum", "Taipei Defense Ministry opened the coastal forum in 2025 years.")
+    right = revision(2, "https://bravo.test/b", "Taipei security forum", "Taipei Defense Ministry opened the coastal forum in 30,000 years.")
+
+    assert compare_topic((left, right)) == []
+
+
+def test_compare_topic_only_compares_opposites_within_matching_local_events():
+    from gaohe.topics import compare_topic
+
+    left = revision(1, "https://alpha.test/a", "Taipei defense forum", "Taipei Defense Ministry held a coastal forum. The archive opened.")
+    right = revision(2, "https://bravo.test/b", "Taipei security forum", "Taipei Defense Ministry held a coastal forum. The hospital closed.")
+
+    assert compare_topic((left, right)) == []
+
+
+def test_compare_topic_detects_opposites_for_the_same_local_event():
+    from gaohe.topics import compare_topic
+
+    left = revision(1, "https://alpha.test/a", "Taipei defense forum", "Taipei Defense Ministry approved the coastal permit.")
+    right = revision(2, "https://bravo.test/b", "Taipei security forum", "Taipei Defense Ministry rejected the coastal permit.")
+
+    candidates = compare_topic((left, right))
+
+    assert len(candidates) == 1
+    assert left.text[candidates[0].start:candidates[0].end] == "approved"
+
+
+def test_compare_topic_rejects_credential_bearing_revision_urls():
+    from gaohe.topics import compare_topic
+
+    unsafe = revision(1, "https://user:secret@alpha.test/a", "Taipei defense forum", "Taipei Defense Ministry reports 100 troops deployed at the coastal exercise.")
+    safe = revision(2, "https://bravo.test/b", "Taipei security forum", "Taipei Defense Ministry reports 1000 troops deployed at the coastal exercise.")
+
+    assert compare_topic((unsafe, safe)) == []
 
 
 def test_compare_topic_skips_possible_groups_and_harmless_wording_differences():
@@ -128,8 +200,8 @@ def test_compare_topic_requires_exact_bounded_spans_and_never_compares_same_url_
     update = revision(2, "https://alpha.test/forum", "Taipei defense forum update", "Taipei Defense Ministry reports 1000 troops deployed.")
     assert compare_topic((original, update)) == []
 
-    primary = revision(3, "https://charlie.test/forum", "Taipei defense forum", "Taipei Defense Ministry reports 100 troops deployed.")
-    peer = revision(4, "https://delta.test/forum", "Taipei security forum", "Taipei Defense Ministry reports 1000 troops deployed.")
+    primary = revision(3, "https://charlie.test/forum", "Taipei defense forum", "Taipei Defense Ministry reports 100 troops deployed at the coastal exercise.")
+    peer = revision(4, "https://delta.test/forum", "Taipei security forum", "Taipei Defense Ministry reports 1000 troops deployed at the coastal exercise.")
     candidate = compare_topic((primary, peer))[0]
 
     assert 0 <= candidate.start < candidate.end <= len(primary.text)
