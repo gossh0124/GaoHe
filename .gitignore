@@ -1,4 +1,5 @@
 .env
+.env.tmp-*
 .venv/
 .worktrees
 __pycache__/

@@ -15,6 +15,7 @@ from .sources import UrllibTransport
 from .storage import MAX_EVIDENCE_EXCERPT_CHARS, Store, redact_text, redact_url
 from .topics import compare_topic, group_revision
 from .web import serve
+from .setup_flow import run_setup_wizard
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--host", default="127.0.0.1")
     status.add_argument("--port", type=int, default=8000)
     status.add_argument("--env-file", type=Path, default=Path(".env"))
+    setup = commands.add_parser("setup")
+    setup.add_argument("--env-file", type=Path, default=Path(".env"))
+    setup.add_argument("--no-browser", action="store_true")
     watch = commands.add_parser("watch")
     watch.add_argument("--once", action="store_true", required=True)
     watch.add_argument("--env-file", type=Path, default=Path(".env"))
@@ -141,6 +145,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "serve":
         serve(host=args.host, port=args.port, env_file=args.env_file)
+        return 0
+    if args.command == "setup":
+        try:
+            settings = load_settings(args.env_file)
+            run_setup_wizard(settings, _store(settings), open_browser=not args.no_browser, env_path=args.env_file)
+        except (OSError, ValueError, sqlite3.Error):
+            print("error: local setup unavailable", file=sys.stderr)
+            return 2
         return 0
     if args.command == "watch":
         try:
