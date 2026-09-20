@@ -122,6 +122,20 @@ def test_evidence_rejects_percent_encoded_sensitive_fragment():
     assert "fragment-secret" not in page and url not in page and "never" not in page
 
 
+def test_evidence_rejects_double_encoded_sensitive_query_and_fragment():
+    query_url = "https://record.example/evidence?api%255Fkey=query-secret"
+    fragment_url = "https://record.example/evidence#api%255Fkey%253Dfragment-secret"
+    page = render_status_page({
+        "inbox": ({"text": "safe", "evidence": (
+            {"url": query_url, "title": "query never"},
+            {"url": fragment_url, "title": "fragment never"},
+        )},),
+        "findings": (), "sources": (), "comparisons": (), "runtime": {},
+    })
+    for value in ("query-secret", "fragment-secret", query_url, fragment_url, "query never", "fragment never"):
+        assert value not in page
+
+
 def test_setup_page_masks_state_and_settings_remain_compatible():
     setup = render_setup_page({"configured": True, "has_llm_key": True, "source_count": 1, "api_key": "secret"})
     assert "secret" not in setup and "AI key: present" in setup

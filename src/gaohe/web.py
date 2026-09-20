@@ -74,6 +74,12 @@ def _safe_metadata(value: object) -> str:
     return redacted if redacted == value else ""
 
 
+def _decode_to_stable(value: str) -> str:
+    while (decoded := unquote(value)) != value:
+        value = decoded
+    return value
+
+
 def _evidence_link(item: object) -> str:
     url = _value(item, "url", _value(item, "source_url", ""))
     if not isinstance(url, str):
@@ -83,7 +89,7 @@ def _evidence_link(item: object) -> str:
         valid = parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password
     except ValueError:
         valid = False
-    if not valid or _SENSITIVE_METADATA.search(unquote(parsed.fragment)):
+    if not valid or any(_SENSITIVE_METADATA.search(_decode_to_stable(value)) for value in (parsed.query, parsed.fragment)):
         return ""
     safe_url = redact_url(url)
     title = _text(_safe_metadata(_value(item, "title", _value(item, "name", "Evidence"))) or "Evidence")
