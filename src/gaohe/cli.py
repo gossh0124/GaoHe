@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from pathlib import Path
 import sqlite3
 import sys
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from . import __version__
 from .config import Settings, load_settings
@@ -52,6 +52,17 @@ def _store(settings: Settings) -> Store:
 def _is_http_url(value: str) -> bool:
     parsed = urlsplit(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _redact_url(value: str) -> str:
+    parsed = urlsplit(value)
+    query = urlencode([
+        (key, "***" if key.lower() in {
+            "authorization", "cookie", "token", "secret", "password", "session", "api-key", "api_key",
+        } else query_value)
+        for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
+    ])
+    return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, query, parsed.fragment))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -109,7 +120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             for source in store.list_sources():
                 print(
                     f"id={source.id} enabled={'yes' if source.enabled else 'no'} name={source.name} "
-                    f"feed_url={source.feed_url} article_url={source.article_url or '-'}"
+                    f"feed_url={_redact_url(source.feed_url)} "
+                    f"article_url={_redact_url(source.article_url) if source.article_url else '-'}"
                 )
             return 0
         enabled = args.source_command == "enable"

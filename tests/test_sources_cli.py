@@ -24,6 +24,24 @@ def test_source_add_and_list_use_the_configured_data_directory_without_printing_
     assert "top-secret-value" not in output
 
 
+def test_source_list_redacts_url_credentials_and_sensitive_query_values(tmp_path, capsys):
+    env_file = write_env(tmp_path)
+
+    assert cli.main([
+        "source", "add", "--name", "Private Feed",
+        "--feed-url", "https://token:secret@example.test/feed.xml?token=feed-token&lang=zh-TW",
+        "--article-url", "https://reader:article-secret@example.test/news?api_key=article-key&page=2",
+        "--env-file", str(env_file),
+    ]) == 0
+    assert cli.main(["source", "list", "--env-file", str(env_file)]) == 0
+
+    output = capsys.readouterr().out
+    for secret in ("token:secret", "feed-token", "reader:article-secret", "article-key"):
+        assert secret not in output
+    assert "https://example.test/feed.xml?token=%2A%2A%2A&lang=zh-TW" in output
+    assert "https://example.test/news?api_key=%2A%2A%2A&page=2" in output
+
+
 def test_source_enable_and_disable_change_the_persisted_source_state(tmp_path, capsys):
     env_file = write_env(tmp_path)
     assert cli.main([
