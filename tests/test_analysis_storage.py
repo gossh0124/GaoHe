@@ -109,6 +109,20 @@ def test_evidence_persists_only_safe_provider_identifiers(tmp_path: Path):
     assert row == (None,)
 
 
+def test_save_evidence_redacts_authorization_and_cookie_values_at_database_boundary(tmp_path: Path):
+    store, _ = revision_store(tmp_path)
+
+    store.save_evidence(Evidence(
+        None, None, "https://evidence.test/ok", "Public title",
+        "authorization=secret-value cookie=abc123 ordinary text", "context", "retrieved", "direct",
+        "2026-09-18T04:00:00Z",
+    ))
+
+    with sqlite3.connect(store.path) as connection:
+        excerpt = connection.execute("SELECT excerpt FROM evidence").fetchone()[0]
+    assert excerpt == "authorization=[redacted] cookie=[redacted] ordinary text"
+
+
 def test_redact_url_redacts_sensitive_fragments_and_keeps_safe_fragments():
     assert redact_url("https://evidence.test/article#access_token=secret") == "https://evidence.test/article#access_token=***"
     assert redact_url("https://evidence.test/article#section-1") == "https://evidence.test/article#section-1"

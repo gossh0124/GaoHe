@@ -15,7 +15,7 @@ _SENSITIVE_NAME = r"(?:authorization|cookie|token|secret|password|session|api[-_
 _SENSITIVE_HEADER = re.compile(rf"(?im)^[^\r\n:]*?{_SENSITIVE_NAME}[^\r\n:]*:\s*[^\r\n]*")
 _SENSITIVE_QUERY = re.compile(rf"(?i)([?&][^=&#\s]*{_SENSITIVE_NAME}[^=&#\s]*=)[^&#\s]*")
 _SENSITIVE_FRAGMENT = re.compile(rf"(?i)(^|[?&])([^=&#\s]*{_SENSITIVE_NAME}[^=&#\s]*=)[^&#\s]*")
-_SENSITIVE_VALUE = re.compile(r"(?i)\b(?:api[_-]?key|(?:access|refresh|client)[_-]?(?:token|secret)|token|secret|password|passwd|pwd|session(?:[_-]?id)?)\s*=\s*[^\s,;&]+")
+_SENSITIVE_VALUE = re.compile(rf"(?i)\b(?:{_SENSITIVE_NAME}|(?:access|refresh|client)[_-]?(?:token|secret)|passwd|pwd|session(?:[_-]?id)?)\s*=\s*[^\s,;&]+")
 _BEARER_TOKEN = re.compile(r"(?i)bearer\s+[^\s,;]+")
 MAX_EVIDENCE_EXCERPT_CHARS = 2_000
 _PROVIDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")

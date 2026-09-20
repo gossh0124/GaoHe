@@ -101,7 +101,10 @@ def extract_claims(revision: ArticleRevision, provider: AnalysisProvider, relate
 
 
 def _canonical_url(url: str) -> str | None:
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         return None
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, parsed.query, ""))
@@ -112,8 +115,10 @@ def _query(candidate: FindingCandidate, revision: ArticleRevision | None = None)
     if re.search(r"(?i)(?:https?://[^\s/@]+:[^\s/@]+@|\b(?:api[-_]?key|(?:access|refresh|client)[-_]?(?:token|secret)|token|secret|password|passwd|pwd|cookie|authorization)\s*(?:=|:))", query):
         return ""
     query = " ".join(query.split())
-    if revision is not None and query and query in " ".join(revision.text.split()):
-        return ""
+    if revision is not None and query:
+        article_text = " ".join(revision.text.split())
+        if query in article_text or article_text in query:
+            return ""
     return query[:MAX_QUERY_CHARS]
 
 
@@ -131,7 +136,7 @@ def retrieve_evidence(candidate: FindingCandidate, search: EvidenceSearchProvide
     if not query:
         return []
     bounded_limit = min(max(1, limit), MAX_SEARCH_LIMIT)
-    hits: list[SearchHit] = []
+    hits: list[tuple[SearchHit, str]] = []
     seen: set[str] = set()
     try:
         search_hits = search.search(query, bounded_limit)
@@ -141,11 +146,11 @@ def retrieve_evidence(candidate: FindingCandidate, search: EvidenceSearchProvide
         canonical = _canonical_url(hit.url)
         if canonical is not None and canonical not in seen:
             seen.add(canonical)
-            hits.append(hit)
+            hits.append((hit, canonical))
             if len(hits) == bounded_limit:
                 break
     result: list[Evidence] = []
-    for hit in hits:
+    for hit, canonical in hits:
         try:
             page = fetcher.fetch(hit.url)
         except Exception:

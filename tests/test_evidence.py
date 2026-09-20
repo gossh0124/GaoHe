@@ -221,3 +221,42 @@ def test_analyze_revision_never_searches_a_candidate_query_that_is_the_full_arti
     result = analyze_revision(item, (), Analysis(AnalysisResult(item.id, (stated,), (proposed,))), search, Fetcher({}, []))
     assert result.evidence == ()
     assert search.calls == []
+
+
+def test_analyze_revision_never_searches_a_prefixed_full_article_query():
+    from gaohe.analysis import analyze_revision
+
+    item = revision("The report says 100 units.")
+    stated = Claim(None, item.id, "100 units", 16, 25, "checkable", "material", "extracted")
+    proposed = FindingCandidate(None, "factual_contradiction", "Check", 16, 25, "material", f"Check: {item.text}", item.id)
+    search = Search((), [])
+
+    result = analyze_revision(item, (), Analysis(AnalysisResult(item.id, (stated,), (proposed,))), search, Fetcher({}, []))
+
+    assert result.evidence == ()
+    assert search.calls == []
+
+
+def test_retrieve_evidence_skips_malformed_hit_and_keeps_other_hits():
+    from gaohe.analysis import retrieve_evidence
+
+    item = revision()
+    safe = "https://record.test/safe"
+    search = Search((SearchHit("https://[bad", "Bad", "", "official", None), SearchHit(safe, "Safe", "", "official", None)), [])
+
+    result = retrieve_evidence(candidate(item), search, Fetcher({safe: page(safe)}, []))
+
+    assert [(item.url, item.status) for item in result] == [(safe, "retrieved")]
+
+
+def test_retrieve_evidence_records_each_fetch_failure_against_its_own_hit():
+    from gaohe.analysis import retrieve_evidence
+
+    item = revision()
+    failed = "https://record.test/failed"
+    safe = "https://record.test/safe"
+    search = Search((SearchHit(failed, "Failed", "", "official", None), SearchHit(safe, "Safe", "", "official", None)), [])
+
+    result = retrieve_evidence(candidate(item), search, Fetcher({safe: page(safe)}, []))
+
+    assert [(item.url, item.status) for item in result] == [(failed, "retrieval_failed"), (safe, "retrieved")]
