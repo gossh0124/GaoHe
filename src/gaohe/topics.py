@@ -18,7 +18,10 @@ _NUMBER = re.compile(r"(?<![\w,])(\d[\d,]*)(?:\s*)([%A-Za-z]+|[\u4e00-\u9fff]{1,
 _APPROXIMATE = re.compile(r"(?:about|around|approximately|roughly|nearly|over|under|約|近|逾|超過)\s*$", re.IGNORECASE)
 _OPPOSITES = (("approved", "rejected"), ("opened", "closed"), ("confirmed", "denied"), ("arrested", "released"), ("批准", "否決"), ("開放", "關閉"), ("確認", "否認"), ("逮捕", "釋放"))
 _STOPWORDS = {"a", "an", "and", "after", "at", "by", "for", "from", "in", "of", "on", "or", "the", "that", "this", "to", "with", "reported", "reports", "said", "says"}
-_DATE_UNITS = {"am", "pm", "day", "days", "hour", "hours", "month", "months", "year", "years"}
+_DATE_UNITS = {
+    "am", "pm", "day", "days", "hour", "hours", "minute", "minutes", "second", "seconds", "week", "weeks", "month", "months", "year", "years",
+    "年", "月", "日", "時", "點", "分", "分鐘", "秒", "週", "星期",
+}
 
 
 def _tokens(value: str) -> set[str]:
@@ -71,7 +74,7 @@ def _pair_confidence(left: ArticleRevision, right: ArticleRevision) -> str | Non
     shared_entities = (_entities(left.title + " " + left.text) - _STOPWORDS) & (_entities(right.title + " " + right.text) - _STOPWORDS)
     shared_events = _event_tokens(left.title + " " + left.text) & _event_tokens(right.title + " " + right.text)
     shared_body_events = _event_tokens(left.text) & _event_tokens(right.text)
-    if _host(left_url) != _host(right_url) and shared_entities and len(shared_events) >= 2 and shared_body_events:
+    if _host(left_url) != _host(right_url) and shared_entities and len(shared_events) >= 2 and len(shared_body_events) >= 2:
         return "high"
     if shared_events:
         return "possible"
@@ -135,18 +138,18 @@ def _opposite_difference(left: ArticleRevision, right: ArticleRevision) -> tuple
     opposite_words = {word for pair in _OPPOSITES for word in pair}
     for first, second in _OPPOSITES:
         for left_word, right_word in ((first, second), (second, first)):
-            start = left_text.find(left_word)
-            while start != -1:
+            left_matches = re.finditer(rf"\b{re.escape(left_word)}\b", left_text) if left_word.isascii() else re.finditer(re.escape(left_word), left_text)
+            for left_match in left_matches:
+                start = left_match.start()
                 left_context = _sentence(left.text, start, start + len(left_word))
                 left_entities = _entities(left_context) - _STOPWORDS
                 left_events = _event_tokens(left_context, opposites=opposite_words)
-                right_start = right_text.find(right_word)
-                while right_start != -1:
+                right_matches = re.finditer(rf"\b{re.escape(right_word)}\b", right_text) if right_word.isascii() else re.finditer(re.escape(right_word), right_text)
+                for right_match in right_matches:
+                    right_start = right_match.start()
                     right_context = _sentence(right.text, right_start, right_start + len(right_word))
                     if (left_entities & (_entities(right_context) - _STOPWORDS)) and (left_events & _event_tokens(right_context, opposites=opposite_words)):
                         return start, start + len(left_word), left_word, right_word
-                    right_start = right_text.find(right_word, right_start + len(right_word))
-                start = left_text.find(left_word, start + len(left_word))
     return None
 
 

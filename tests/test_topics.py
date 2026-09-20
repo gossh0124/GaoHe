@@ -65,6 +65,17 @@ def test_group_revision_does_not_promote_matching_titles_without_body_event_anch
     assert topic is None or topic.confidence != "high"
 
 
+def test_group_revision_does_not_promote_one_body_anchor_with_matching_title_to_high():
+    from gaohe.topics import group_revision
+
+    existing = revision(1, "https://alpha.test/a", "Taipei coastal permit update", "Taipei Ministry deployed troops.")
+    incoming = revision(2, "https://bravo.test/b", "Taipei coastal permit update", "Taipei Ministry deployed soldiers.")
+
+    topic = group_revision(incoming, (existing,))
+
+    assert topic is None or topic.confidence != "high"
+
+
 def test_group_revision_never_treats_an_updated_same_url_as_cross_media_peer():
     from gaohe.topics import group_revision
 
@@ -141,6 +152,18 @@ def test_compare_topic_ignores_years_and_dates():
     assert compare_topic((left, right)) == []
 
 
+def test_compare_topic_ignores_chinese_year_and_duration_units():
+    from gaohe.topics import compare_topic
+
+    years_left = revision(1, "https://alpha.test/a", "Taipei defense forum", "Taipei Defense Ministry reports coastal forum exercise in 2025年.")
+    years_right = revision(2, "https://bravo.test/b", "Taipei security forum", "Taipei Defense Ministry reports coastal forum exercise in 30000年.")
+    minutes_left = revision(3, "https://charlie.test/c", "Taipei defense forum", "Taipei Defense Ministry reports coastal forum exercise in 10分鐘.")
+    minutes_right = revision(4, "https://delta.test/d", "Taipei security forum", "Taipei Defense Ministry reports coastal forum exercise in 100分鐘.")
+
+    assert compare_topic((years_left, years_right)) == []
+    assert compare_topic((minutes_left, minutes_right)) == []
+
+
 def test_compare_topic_only_compares_opposites_within_matching_local_events():
     from gaohe.topics import compare_topic
 
@@ -160,6 +183,15 @@ def test_compare_topic_detects_opposites_for_the_same_local_event():
 
     assert len(candidates) == 1
     assert left.text[candidates[0].start:candidates[0].end] == "approved"
+
+
+def test_compare_topic_does_not_match_english_opposites_inside_larger_words():
+    from gaohe.topics import compare_topic
+
+    unopened = revision(1, "https://alpha.test/a", "Taipei defense forum", "Taipei Defense Ministry left the coastal permit unopened.")
+    reopened = revision(2, "https://bravo.test/b", "Taipei security forum", "Taipei Defense Ministry reopened the coastal permit and later closed it.")
+
+    assert compare_topic((unopened, reopened)) == []
 
 
 def test_compare_topic_rejects_credential_bearing_revision_urls():
