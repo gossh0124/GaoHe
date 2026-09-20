@@ -68,6 +68,8 @@ def test_remove_and_status_have_safe_result_states():
 
     assert task_status("GaoHe Watch", FakeRunner(result())) == "installed"
     assert task_status("GaoHe Watch", FakeRunner(result(1, stderr="ERROR: The system cannot find the file specified."))) == "not installed"
+    assert task_status("GaoHe Watch", FakeRunner(result(1, stderr="錯誤：系統找不到指定的檔案。"))) == "not installed"
+    assert task_status("GaoHe Watch", FakeRunner(result(1, stderr="工作不存在。"))) == "not installed"
     assert task_status("GaoHe Watch", FakeRunner(result(1, stderr="Access is denied."))) == "query failed"
 
 
@@ -89,7 +91,9 @@ def test_scheduler_runner_uses_argument_list_without_shell(monkeypatch):
 def test_run_watch_script_orders_analysis_after_watch_and_keeps_watch_exit_path():
     script = (Path(__file__).parents[1] / "scripts" / "run-watch.ps1").read_text(encoding="utf-8")
 
-    assert script.index("watch --once") < script.index("analyze --pending")
+    assert script.index("watch --once --env-file $EnvFile") < script.index("analyze --pending --env-file $EnvFile")
+    assert "[string]$EnvFile" in script
+    assert "$EnvFile = [IO.Path]::GetFullPath($EnvFile)" in script
     assert "$watchExit = $LASTEXITCODE" in script
     assert "if ($watchExit -ne 0)" in script
     assert "exit $watchExit" in script
@@ -107,3 +111,5 @@ def test_cli_schedule_commands_use_scheduler_runner_without_auto_install(tmp_pat
 
     assert capsys.readouterr().out.splitlines() == ["schedule installed", "installed", "schedule removed"]
     assert runner.calls[0][runner.calls[0].index("/MO") + 1] == "12"
+    command = runner.calls[0][runner.calls[0].index("/TR") + 1]
+    assert f'-EnvFile "{env_file.resolve()}"' in command

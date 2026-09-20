@@ -176,6 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.python_path or Path(sys.executable),
                     settings.poll_interval_minutes,
                     runner,
+                    args.env_file.resolve(),
                 )
                 print("schedule installed")
                 return 0

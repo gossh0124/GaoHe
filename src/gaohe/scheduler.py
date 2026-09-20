@@ -16,9 +16,12 @@ def _powershell_path() -> Path:
     return (Path(os.environ.get("SystemRoot", r"C:\\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe").resolve()
 
 
-def _task_command(project_dir: Path, python_path: Path) -> str:
+def _task_command(project_dir: Path, python_path: Path, env_path: Path) -> str:
     script_path = (project_dir / "scripts" / "run-watch.ps1").resolve()
-    return f'"{_powershell_path()}" -NoProfile -ExecutionPolicy Bypass -File "{script_path}" -PythonPath "{python_path}"'
+    return (
+        f'"{_powershell_path()}" -NoProfile -ExecutionPolicy Bypass -File "{script_path}" '
+        f'-PythonPath "{python_path}" -EnvFile "{env_path}"'
+    )
 
 
 def install_task(
@@ -27,13 +30,15 @@ def install_task(
     python_path: Path,
     interval_minutes: int,
     runner: SchedulerRunner,
+    env_path: Path | None = None,
 ) -> None:
     if interval_minutes <= 0:
         raise ValueError("interval must be positive")
     project_path = project_dir.resolve()
     interpreter = python_path.resolve()
+    settings_path = (env_path or project_path / ".env").resolve()
     result = runner.run([
-        "/Create", "/TN", task_name, "/TR", _task_command(project_path, interpreter),
+        "/Create", "/TN", task_name, "/TR", _task_command(project_path, interpreter, settings_path),
         "/SC", "MINUTE", "/MO", str(interval_minutes), "/RU", getpass.getuser(),
         "/IT", "/RL", "LIMITED", "/F",
     ])
@@ -51,6 +56,12 @@ def task_status(task_name: str, runner: SchedulerRunner) -> str:
     if result.returncode == 0:
         return "installed"
     message = f"{result.stdout}\n{result.stderr}".lower()
-    if "cannot find" in message or "not found" in message or "0x80070002" in message:
+    if (
+        "cannot find" in message
+        or "not found" in message
+        or "0x80070002" in message
+        or "找不到" in message
+        or "不存在" in message
+    ):
         return "not installed"
     return "query failed"
