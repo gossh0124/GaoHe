@@ -16,6 +16,7 @@ from .storage import MAX_EVIDENCE_EXCERPT_CHARS, Store, redact_text, redact_url
 from .topics import compare_topic, group_revision
 from .web import serve
 from .setup_flow import run_setup_wizard
+from .scheduler import SchedulerRunner, install_task, remove_task, task_status
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +32,16 @@ def build_parser() -> argparse.ArgumentParser:
     setup = commands.add_parser("setup")
     setup.add_argument("--env-file", type=Path, default=Path(".env"))
     setup.add_argument("--no-browser", action="store_true")
+    schedule = commands.add_parser("schedule")
+    schedule_commands = schedule.add_subparsers(dest="schedule_command", required=True)
+    schedule_install = schedule_commands.add_parser("install")
+    schedule_install.add_argument("--task-name", default="GaoHe Watch")
+    schedule_install.add_argument("--project-dir", type=Path)
+    schedule_install.add_argument("--python-path", type=Path)
+    schedule_install.add_argument("--env-file", type=Path, default=Path(".env"))
+    for action in ("status", "remove"):
+        schedule_action = schedule_commands.add_parser(action)
+        schedule_action.add_argument("--task-name", default="GaoHe Watch")
     watch = commands.add_parser("watch")
     watch.add_argument("--once", action="store_true", required=True)
     watch.add_argument("--env-file", type=Path, default=Path(".env"))
@@ -154,6 +165,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("error: local setup unavailable", file=sys.stderr)
             return 2
         return 0
+    if args.command == "schedule":
+        runner = SchedulerRunner()
+        try:
+            if args.schedule_command == "install":
+                settings = load_settings(args.env_file)
+                install_task(
+                    args.task_name,
+                    args.project_dir or Path.cwd(),
+                    args.python_path or Path(sys.executable),
+                    settings.poll_interval_minutes,
+                    runner,
+                )
+                print("schedule installed")
+                return 0
+            if args.schedule_command == "remove":
+                remove_task(args.task_name, runner)
+                print("schedule removed")
+                return 0
+            print(task_status(args.task_name, runner))
+            return 0
+        except (OSError, ValueError, RuntimeError):
+            print("error: schedule unavailable", file=sys.stderr)
+            return 2
     if args.command == "watch":
         try:
             settings = load_settings(args.env_file)
@@ -221,3 +255,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     parser.print_help()
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
