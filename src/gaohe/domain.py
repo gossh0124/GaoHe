@@ -84,6 +84,9 @@ class Evidence:
     status: str
     source_kind: str
     retrieved_at: str | None
+    provider: str | None = None
+    published_at: str | None = None
+    content_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,7 +121,16 @@ class RunSummary:
     failures: int
 
 
+def normalize_article_content(title: str, text: str) -> tuple[str, str]:
+    """Return the NFC, LF-normalized article title and text."""
+    return (
+        unicodedata.normalize("NFC", title.replace("\r\n", "\n").replace("\r", "\n")),
+        unicodedata.normalize("NFC", text.replace("\r\n", "\n").replace("\r", "\n")),
+    )
+
+
 def article_content_hash(title: str, text: str) -> str:
     """Return the SHA-256 for NFC, LF-normalized title and article text."""
-    normalized = unicodedata.normalize("NFC", f"{title}\n{text}".replace("\r\n", "\n").replace("\r", "\n"))
+    normalized_title, normalized_text = normalize_article_content(title, text)
+    normalized = f"{normalized_title}\n{normalized_text}"
     return sha256(normalized.encode("utf-8")).hexdigest()

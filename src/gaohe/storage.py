@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,7 +8,7 @@ import sqlite3
 from typing import Iterator, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .domain import ArticleRevision, Claim, Evidence, FetchedArticle, Finding, RunSummary, Source, article_content_hash
+from .domain import ArticleRevision, Claim, Evidence, FetchedArticle, Finding, RunSummary, Source, TopicGroup, article_content_hash, normalize_article_content
 
 
 _SENSITIVE_NAME = r"(?:authorization|cookie|token|secret|password|session|api[-_]key)"
@@ -23,6 +24,8 @@ _EVIDENCE_STATUSES = {"pending", "retrieved", "retrieval_failed", "insufficient_
 _EVIDENCE_SOURCE_KINDS = {"direct", "search", "firecrawl", "related_article"}
 _FINDING_TYPES = {"factual_contradiction", "material_cross_media_difference", "unsupported_inference"}
 _FINDING_STATUSES = {"pending", "resolved", "dismissed"}
+_TOPIC_CONFIDENCES = {"high", "possible", "low"}
+_TOPIC_STATUSES = {"active", "possible", "dismissed"}
 
 
 def _require_allowed(name: str, value: str, allowed: set[str]) -> None:
@@ -99,16 +102,7 @@ class Store:
                     title TEXT NOT NULL,
                     published_at TEXT,
                     discovered_at TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    current_revision_id INTEGER REFERENCES article_revisions(id)
-                );
-                CREATE TABLE IF NOT EXISTS article_revisions (
-                    id INTEGER PRIMARY KEY,
-                    article_id INTEGER NOT NULL REFERENCES articles(id),
-                    text TEXT NOT NULL,
-                    fetched_at TEXT NOT NULL,
-                    content_hash TEXT NOT NULL,
-                    fetch_status TEXT NOT NULL
+                    metadata_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS runs (
                     id INTEGER PRIMARY KEY,
@@ -119,6 +113,33 @@ class Store:
                     revisions_created INTEGER NOT NULL,
                     failures INTEGER NOT NULL
                 );
+                """
+            )
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'article_revisions'").fetchone():
+                self._migrate_revisions(connection)
+            else:
+                connection.execute(
+                    """CREATE TABLE article_revisions (
+                        id INTEGER PRIMARY KEY,
+                        article_id INTEGER NOT NULL REFERENCES articles(id),
+                        title TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        fetched_at TEXT NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        fetch_status TEXT NOT NULL
+                    )"""
+                )
+            revision_columns = {row[1] for row in connection.execute("PRAGMA table_info(article_revisions)")}
+            if "title" not in revision_columns:
+                connection.execute("ALTER TABLE article_revisions ADD COLUMN title TEXT")
+                connection.execute("UPDATE article_revisions SET title = (SELECT title FROM articles WHERE articles.id = article_revisions.article_id)")
+            article_columns = {row[1] for row in connection.execute("PRAGMA table_info(articles)")}
+            if "current_revision_id" not in article_columns:
+                connection.execute("ALTER TABLE articles ADD COLUMN current_revision_id INTEGER REFERENCES article_revisions(id)")
+                connection.execute("""UPDATE articles SET current_revision_id = (
+                    SELECT id FROM article_revisions WHERE article_id = articles.id ORDER BY id DESC LIMIT 1)""")
+            connection.executescript(
+                """
                 CREATE TABLE IF NOT EXISTS claims (
                     id INTEGER PRIMARY KEY,
                     revision_id INTEGER NOT NULL REFERENCES article_revisions(id),
@@ -151,7 +172,10 @@ class Store:
                     relation TEXT NOT NULL,
                     status TEXT NOT NULL,
                     source_kind TEXT NOT NULL,
-                    retrieved_at TEXT
+                    retrieved_at TEXT,
+                    provider TEXT,
+                    published_at TEXT,
+                    content_hash TEXT
                 );
                 CREATE TABLE IF NOT EXISTS topics (
                     id INTEGER PRIMARY KEY,
@@ -164,17 +188,16 @@ class Store:
                     revision_id INTEGER NOT NULL REFERENCES article_revisions(id),
                     PRIMARY KEY (topic_id, revision_id)
                 );
+                CREATE TABLE IF NOT EXISTS revision_analysis (
+                    revision_id INTEGER PRIMARY KEY REFERENCES article_revisions(id),
+                    status TEXT NOT NULL CHECK (status = 'completed')
+                );
                 """
             )
-            columns = {row[1] for row in connection.execute("PRAGMA table_info(articles)")}
-            if "current_revision_id" not in columns:
-                self._migrate_revisions(connection)
-                connection.execute("ALTER TABLE articles ADD COLUMN current_revision_id INTEGER REFERENCES article_revisions(id)")
-                connection.execute(
-                    """UPDATE articles SET current_revision_id = (
-                       SELECT id FROM article_revisions
-                       WHERE article_id = articles.id ORDER BY id DESC LIMIT 1)"""
-                )
+            evidence_columns = {row[1] for row in connection.execute("PRAGMA table_info(evidence)")}
+            for column in ("provider", "published_at", "content_hash"):
+                if column not in evidence_columns:
+                    connection.execute(f"ALTER TABLE evidence ADD COLUMN {column} TEXT")
 
     @staticmethod
     def _migrate_revisions(connection: sqlite3.Connection) -> None:
@@ -187,13 +210,15 @@ class Store:
             CREATE TABLE article_revisions (
                 id INTEGER PRIMARY KEY,
                 article_id INTEGER NOT NULL REFERENCES articles(id),
+                title TEXT NOT NULL,
                 text TEXT NOT NULL,
                 fetched_at TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
                 fetch_status TEXT NOT NULL
             );
-            INSERT INTO article_revisions (id, article_id, text, fetched_at, content_hash, fetch_status)
-            SELECT id, article_id, text, fetched_at, content_hash, fetch_status FROM article_revisions_legacy;
+            INSERT INTO article_revisions (id, article_id, title, text, fetched_at, content_hash, fetch_status)
+            SELECT revisions.id, revisions.article_id, articles.title, revisions.text, revisions.fetched_at, revisions.content_hash, revisions.fetch_status
+            FROM article_revisions_legacy AS revisions JOIN articles ON articles.id = revisions.article_id;
             DROP TABLE article_revisions_legacy;
             """
         )
@@ -243,7 +268,8 @@ class Store:
         expected_hash = article_content_hash(article.candidate.title, article.text)
         if article.content_hash != expected_hash:
             raise ValueError("content_hash must match normalized title and text")
-        candidate = article.candidate
+        title, text = normalize_article_content(article.candidate.title, article.text)
+        candidate = replace(article.candidate, title=title)
         with self._connection() as connection:
             article_id, current_revision_id = self._save_candidate(connection, candidate)
             if current_revision_id is not None:
@@ -253,9 +279,9 @@ class Store:
                 if current_hash == article.content_hash:
                     return current_revision_id, False
             cursor = connection.execute(
-                """INSERT INTO article_revisions (article_id, text, fetched_at, content_hash, fetch_status)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (article_id, article.text, _utc_iso(article.fetched_at), article.content_hash, article.fetch_status),
+                """INSERT INTO article_revisions (article_id, title, text, fetched_at, content_hash, fetch_status)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (article_id, title, text, _utc_iso(article.fetched_at), article.content_hash, article.fetch_status),
             )
             connection.execute("UPDATE articles SET current_revision_id = ? WHERE id = ?", (cursor.lastrowid, article_id))
             return cursor.lastrowid, True
@@ -295,7 +321,7 @@ class Store:
     @staticmethod
     def _revision(connection: sqlite3.Connection, revision_id: int) -> ArticleRevision | None:
         row = connection.execute(
-            """SELECT revisions.id, revisions.article_id, articles.url, articles.title,
+            """SELECT revisions.id, revisions.article_id, articles.url, revisions.title,
                       revisions.text, revisions.content_hash, revisions.fetched_at
                FROM article_revisions AS revisions
                JOIN articles ON articles.id = revisions.article_id
@@ -318,12 +344,21 @@ class Store:
                 _require_allowed("claim kind", claim.kind, _CLAIM_KINDS)
                 _require_allowed("claim materiality", claim.materiality, _MATERIALITIES)
                 _require_allowed("claim extraction_status", claim.extraction_status, _EXTRACTION_STATUSES)
-                cursor = connection.execute(
-                    """INSERT INTO claims (revision_id, text, start, end, kind, materiality, extraction_status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (revision_id, claim.text, claim.start, claim.end, claim.kind, claim.materiality, claim.extraction_status),
-                )
+                try:
+                    cursor = connection.execute(
+                        """INSERT INTO claims (revision_id, text, start, end, kind, materiality, extraction_status)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (revision_id, claim.text, claim.start, claim.end, claim.kind, claim.materiality, claim.extraction_status),
+                    )
+                except sqlite3.IntegrityError as error:
+                    if "claims.revision_id, claims.start, claims.end" in str(error):
+                        raise ValueError("duplicate claim span") from error
+                    raise
                 claim_ids.append(cursor.lastrowid)
+            connection.execute(
+                "INSERT INTO revision_analysis (revision_id, status) VALUES (?, 'completed') ON CONFLICT(revision_id) DO UPDATE SET status = excluded.status",
+                (revision_id,),
+            )
             return claim_ids
 
     def save_evidence(self, evidence: Evidence) -> int:
@@ -332,10 +367,13 @@ class Store:
         _require_allowed("evidence source_kind", evidence.source_kind, _EVIDENCE_SOURCE_KINDS)
         with self._connection() as connection:
             cursor = connection.execute(
-                """INSERT INTO evidence (finding_id, url, title, excerpt, relation, status, source_kind, retrieved_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (evidence.finding_id, redact_url(evidence.url), evidence.title, evidence.excerpt, evidence.relation,
-                 evidence.status, evidence.source_kind, _utc_iso(evidence.retrieved_at) if evidence.retrieved_at else None),
+                """INSERT INTO evidence (finding_id, url, title, excerpt, relation, status, source_kind, retrieved_at, provider, published_at, content_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (evidence.finding_id, redact_url(evidence.url),
+                 evidence.title if evidence.status == "retrieved" else f"Evidence {evidence.status.replace('_', ' ')}",
+                 evidence.excerpt if evidence.status == "retrieved" else "", evidence.relation, evidence.status,
+                 evidence.source_kind, _utc_iso(evidence.retrieved_at) if evidence.retrieved_at else None, evidence.provider,
+                 _utc_iso(evidence.published_at) if evidence.published_at else None, evidence.content_hash),
             )
             return cursor.lastrowid
 
@@ -368,16 +406,26 @@ class Store:
                 (topic_id, revision_id),
             )
 
+    def save_topic(self, topic: TopicGroup) -> int:
+        _require_allowed("topic confidence", topic.confidence, _TOPIC_CONFIDENCES)
+        _require_allowed("topic status", topic.status, _TOPIC_STATUSES)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO topics (label, confidence, status) VALUES (?, ?, ?)",
+                (topic.label, topic.confidence, topic.status),
+            )
+            return cursor.lastrowid
+
     def list_pending_revisions(self, limit: int = 20) -> list[ArticleRevision]:
         if limit < 1:
             raise ValueError("limit must be positive")
         with self._connection() as connection:
             return [ArticleRevision(*row) for row in connection.execute(
-                """SELECT revisions.id, revisions.article_id, articles.url, articles.title,
+                """SELECT revisions.id, revisions.article_id, articles.url, revisions.title,
                           revisions.text, revisions.content_hash, revisions.fetched_at
                    FROM article_revisions AS revisions
                    JOIN articles ON articles.id = revisions.article_id
-                   WHERE NOT EXISTS (SELECT 1 FROM claims WHERE claims.revision_id = revisions.id)
+                   WHERE NOT EXISTS (SELECT 1 FROM revision_analysis WHERE revision_analysis.revision_id = revisions.id AND revision_analysis.status = 'completed')
                    ORDER BY revisions.id LIMIT ?""",
                 (limit,),
             )]
@@ -385,7 +433,7 @@ class Store:
     def list_topic_revisions(self, topic_id: int) -> list[ArticleRevision]:
         with self._connection() as connection:
             return [ArticleRevision(*row) for row in connection.execute(
-                """SELECT revisions.id, revisions.article_id, articles.url, articles.title,
+                """SELECT revisions.id, revisions.article_id, articles.url, revisions.title,
                           revisions.text, revisions.content_hash, revisions.fetched_at
                    FROM topic_articles
                    JOIN article_revisions AS revisions ON revisions.id = topic_articles.revision_id
