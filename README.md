@@ -12,9 +12,12 @@
 
 ## 一般 Windows 使用者：GitHub Release ZIP
 
-從 GitHub Release 下載並完整解壓縮 ZIP；不需要 Git。電腦需先安裝 Python 3.11 或更新版本。雙擊 `setup.cmd`，它會建立（或重用）此資料夾內的 `.venv`、以本機套件啟動設定精靈，並在瀏覽器要求輸入**自己的 Gemini API key**、模型與至少一個媒體 RSS／列表網址。目前僅支援 Gemini；其他 AI provider 是後續工作。每位下載者各自使用自己的帳號、額度與條款，key 僅保留在本機 `.env`。
+目前的一般使用者流程如下：
 
-完成精靈後，可在 PowerShell 於解壓縮資料夾執行：
+1. 從 GitHub Release 下載並完整解壓縮 ZIP；不需要 Git，但電腦需先安裝 Python 3.11 或更新版本。
+2. 雙擊 `setup.cmd`。它會建立（或重用）此資料夾內的 `.venv`，並啟動本機設定精靈。
+3. 在精靈輸入**自己的 Gemini API key**、Gemini model 與至少一個媒體 RSS／列表網址。目前僅支援 Gemini；其他 AI provider 是後續工作。每位下載者各自使用自己的帳號、額度與條款，key 僅保留在本機 `.env`。
+4. 在解壓縮資料夾開啟 PowerShell，安裝排程、確認狀態，再開啟只綁定本機的監看頁面：
 
 ```powershell
 & .\.venv\Scripts\python.exe -m gaohe schedule install --env-file .env
@@ -22,9 +25,9 @@
 & .\.venv\Scripts\python.exe -m gaohe serve --env-file .env
 ```
 
-`schedule status` 應回報 `installed`；本機頁面預設在 `http://127.0.0.1:8000/`。排程只在目前登入使用者下定期執行，不建立 Windows Service，也不保存 Windows 密碼。
+`schedule status` 應回報 `installed`；接著以瀏覽器開啟 `http://127.0.0.1:8000/`。排程只在目前登入使用者下定期執行，不建立 Windows Service，也不保存 Windows 密碼。
 
-要移除工具時，雙擊 `uninstall.cmd`。預設只移除固定名稱的 `GaoHe Watch` 排程與此專案的 `.venv`，會保留 `.env` 和 SQLite 資料。若確定要刪除設定或資料，請在 PowerShell 明確輸入：
+5. 完成使用後可雙擊 `uninstall.cmd`。預設只移除固定名稱的 `GaoHe Watch` 排程與此專案的 `.venv`，會保留 `.env` 和 SQLite 資料。若確定要刪除設定或資料，請在 PowerShell 明確輸入：
 
 ```powershell
 .\uninstall.cmd -DeleteConfig -DeleteData -Confirmation "DELETE GAOHE DATA"
@@ -34,12 +37,16 @@
 
 ## 開發者安裝
 
-需求：Python 3.11 或更新版本與 Git。若 `py` launcher 不在 PATH，請以你安裝的 `python.exe` 取代下方的 `py -3.11`。
+需求：Git 與 Python 3.11 或更新版本。先 clone，再建立虛擬環境與安裝 editable package；若 `py` launcher 不在 PATH，請以你安裝的 `python.exe` 取代下方的 `py -3.11`。
 
 ```powershell
+git clone https://github.com/<owner>/GaoHe.git
+Set-Location GaoHe
 py -3.11 -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 Copy-Item .env.example .env
+& .\.venv\Scripts\python.exe -m pytest -p no:cacheprovider -q
+& .\.venv\Scripts\python.exe -m gaohe doctor --env-file .env
 ```
 
 目前的來源監測不會呼叫 AI 或搜尋服務；可先保留 provider 設定空白。若要使用現有分析功能，設定目前唯一支援的 Gemini `LLM_PROVIDER`、`LLM_MODEL` 與 `LLM_API_KEY`：
@@ -69,7 +76,17 @@ WEB_SEARCH_PROVIDER=none
 
 ## 監測契約
 
-監測採 metadata-first：先記錄來源出現的文章 metadata，再在內容變更時建立新的文章 revision。抓取失敗只會留下來源／抓取失敗紀錄，不代表文章有問題，更不是事實判定。來源、文章 metadata、內容版本與檢查結果預設都只留在本機資料目錄的 SQLite 資料庫。
+監測採 metadata-first：先記錄來源出現的文章 metadata，再在內容變更時建立新的文章 revision。頁面內容有變更時，會建立一個新的 revision，並進入一次 pending analysis cycle；內容 hash 未變時，會略過重複 revision。抓取失敗只會留下來源／抓取失敗紀錄，不代表文章有問題，更不是事實判定。證據不足、搜尋未命中或取回失敗時，finding 仍維持非結論性的狀態；GaoHe 不會替整篇文章下 verdict。來源、文章 metadata、內容版本與檢查結果預設都只留在本機資料目錄的 SQLite 資料庫。
+
+## 疑難排解
+
+- **找不到 Python：** 安裝 Python 3.11+ 後重新執行 `setup.cmd`；若已安裝但 `py` 不可用，使用該 Python 的完整 `python.exe` 路徑執行開發者指令。
+- **本機頁面埠號已被使用：** 關閉先前的 `gaohe serve`，或用 `gaohe serve --port 8001 --env-file .env` 改用未佔用埠號，並開啟相同的 `127.0.0.1` 位址。
+- **來源 URL 無效：** 設定精靈只接受無帳密、無空白的 HTTP(S) RSS／列表 URL；請改用媒體公開提供的正確網址。
+- **來源取回失敗：** 檢查網路、網址與媒體端是否暫時回應失敗；失敗紀錄不表示新聞內容有問題，稍後排程會再嘗試。
+- **沒有或不足夠的證據：** 這表示系統沒有取得可追溯、範圍足夠的證據；結果會維持 pending、retrieval failed 或 insufficient scope，而不會變成文章總判決。
+- **Gemini 額度或錯誤：** 確認自己的 key、模型、帳戶額度、rate limit 與供應商條款；GaoHe 不共用 repository 的帳戶或額度。
+- **Firecrawl：** Firecrawl 目前尚未接入 runtime，不能作為現行分析的搜尋／抓取來源。未來若啟用，仍是使用者自己的 credits 與 rate limits，且可能遇到 403、付費牆、JavaScript、登入或 CAPTCHA；GaoHe 不會繞過這些限制。
 
 ## 測試與 CI
 
@@ -79,7 +96,7 @@ WEB_SEARCH_PROVIDER=none
 & .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-GitHub Actions 使用 `windows-latest` 與 Python 3.11，在每次 push／PR 執行安裝與 pytest。CI 使用 deterministic tests，不呼叫外部 provider 或搜尋服務、不建立真正的 Task Scheduler 工作，也不需要 API secret；CI 綠燈不等於新聞事實判斷正確。上述安裝精靈與排程尚未完成真人瀏覽器／Task Scheduler 操作驗收。
+GitHub Actions 使用 `windows-latest` 與 Python 3.11，在每次 push／PR 執行安裝與 pytest。CI 使用 deterministic tests，不呼叫外部 provider 或搜尋服務、不建立真正的 Task Scheduler 工作，也不需要 API secret；CI 綠燈不等於新聞事實判斷正確。上述安裝精靈與排程尚未完成真人瀏覽器／Task Scheduler 操作驗收；CI 不包含 CD 工作。
 
 ## CD
 
