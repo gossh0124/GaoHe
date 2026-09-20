@@ -45,7 +45,7 @@ def test_extract_claims_keeps_nearly_500_officials_as_background_without_candida
     assert result.candidates == ()
 
 
-def test_extract_claims_keeps_only_an_explicit_material_contradiction():
+def test_extract_claims_keeps_an_explicit_material_candidate_pending_without_visible_output():
     from gaohe.analysis import extract_claims
 
     item = revision("該計畫在 2026 年提供 1,000 萬元補助。")
@@ -53,7 +53,48 @@ def test_extract_claims_keeps_only_an_explicit_material_contradiction():
     valid = candidate(item, stated.text)
     provider = FakeAnalysisProvider(AnalysisResult(item.id, (stated,), (valid,)))
 
-    assert extract_claims(item, provider).candidates == (valid,)
+    result = extract_claims(item, provider)
+
+    assert result.candidates == (valid,)
+    assert not hasattr(result, "findings")
+    assert not hasattr(result, "evidence")
+
+
+def test_extract_claims_rejects_duplicate_valid_claim_spans_before_persistence():
+    from gaohe.analysis import extract_claims
+
+    item = revision("The verified wording.")
+    duplicate = (
+        claim(item, "The verified wording", claim_id=11),
+        claim(item, "The verified wording", claim_id=12),
+    )
+
+    with pytest.raises(ValueError, match="duplicate claim span"):
+        extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, duplicate, ())))
+
+
+@pytest.mark.parametrize("kind", ["checkable", "descriptive", "attributed_statement", "inference", "opinion"])
+def test_extract_claims_accepts_each_store_persistable_claim_kind(kind):
+    from gaohe.analysis import extract_claims
+
+    item = revision("The verified wording.")
+    stated = claim(item, "The verified wording", kind=kind, materiality="ordinary")
+
+    assert extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), ()))).claims == (stated,)
+
+
+@pytest.mark.parametrize(
+    ("kind", "materiality", "extraction_status"),
+    [("unsupported", "ordinary", "extracted"), ("checkable", "unsupported", "extracted"), ("checkable", "ordinary", "unsupported")],
+)
+def test_extract_claims_rejects_unbounded_claim_fields(kind, materiality, extraction_status):
+    from gaohe.analysis import extract_claims
+
+    item = revision("The verified wording.")
+    stated = Claim(None, item.id, "The verified wording", 0, len(item.text), kind, materiality, extraction_status)
+
+    with pytest.raises(ValueError, match="claim text or span"):
+        extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), ())))
 
 
 @pytest.mark.parametrize(
@@ -122,28 +163,40 @@ def test_extract_claims_rejects_provider_revision_or_claim_text_mismatch():
         extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (mismatch,), ())))
 
 
-def test_material_gate_requires_exact_claim_association_and_never_makes_no_evidence_visible():
-    from gaohe.analysis import is_material_candidate
+def test_tone_only_ordinary_proposal_stays_pre_evidence_and_has_no_visible_output():
+    from gaohe.analysis import extract_claims, is_material_candidate
 
     item = revision("The verified wording.")
-    stated = claim(item, "The verified wording", claim_id=11)
+    stated = claim(item, "The verified wording", materiality="ordinary", claim_id=11)
     mismatched_id = candidate(item, stated.text, claim_id=12)
     keyword_only = FindingCandidate(None, "factual_contradiction", "Suspicious tone", 0, len("The verified wording"), "material", None)
 
     assert is_material_candidate(stated, mismatched_id, item) is False
-    assert is_material_candidate(stated, keyword_only, item) is True
-    assert not hasattr(keyword_only, "visible")
+    assert is_material_candidate(stated, keyword_only, item) is False
+    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), (keyword_only,))))
+    assert result.candidates == ()
+    assert not hasattr(result, "findings")
+    assert not hasattr(result, "evidence")
 
 
-def test_extract_claims_requires_a_unique_span_match_without_claim_id():
+def test_approximate_450_500_520_claims_remain_background_until_task_4_or_5_resolution():
+    from gaohe.analysis import extract_claims
+
+    item = revision("邀集約 450、近 500 或約 520 位官員與專家。")
+    ordinary = claim(item, "邀集約 450、近 500 或約 520 位官員與專家", kind="descriptive", materiality="ordinary")
+
+    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (ordinary,), (candidate(item, ordinary.text),))))
+
+    # Semantic comparison needs Task 4 evidence or Task 5 verified topic peers.
+    assert result.claims == (ordinary,)
+    assert result.candidates == ()
+
+
+def test_extract_claims_rejects_ambiguous_duplicate_span_association():
     from gaohe.analysis import extract_claims
 
     item = revision("The verified wording.")
     first = claim(item, "The verified wording", claim_id=11)
     duplicate = claim(item, "The verified wording", claim_id=12)
-    unlinked = candidate(item, first.text)
-    linked = candidate(item, first.text, claim_id=11)
-
-    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (first, duplicate), (unlinked, linked))))
-
-    assert result.candidates == (linked,)
+    with pytest.raises(ValueError, match="duplicate claim span"):
+        extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (first, duplicate), ())))

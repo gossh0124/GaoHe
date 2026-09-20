@@ -3,6 +3,11 @@ from hashlib import sha256
 import unicodedata
 
 
+CLAIM_KINDS = frozenset({"checkable", "descriptive", "attributed_statement", "inference", "opinion"})
+CLAIM_MATERIALITIES = frozenset({"ordinary", "material"})
+CLAIM_EXTRACTION_STATUSES = frozenset({"extracted", "rejected"})
+
+
 @dataclass(frozen=True)
 class Source:
     id: int | None

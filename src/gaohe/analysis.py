@@ -1,4 +1,4 @@
-from .domain import ArticleRevision, Claim, normalize_article_content
+from .domain import CLAIM_EXTRACTION_STATUSES, CLAIM_KINDS, CLAIM_MATERIALITIES, ArticleRevision, Claim, normalize_article_content
 from .providers import AnalysisProvider, AnalysisResult, FindingCandidate
 
 
@@ -34,7 +34,9 @@ def _valid_claim(claim: Claim, revision: ArticleRevision) -> bool:
         and isinstance(claim.text, str)
         and 0 < len(claim.text) <= _MAX_CLAIM_CHARS
         and text[claim.start:claim.end] == claim.text
-        and all(isinstance(value, str) and 0 < len(value) <= _MAX_FIELD_CHARS for value in (claim.kind, claim.materiality, claim.extraction_status))
+        and claim.kind in CLAIM_KINDS
+        and claim.materiality in CLAIM_MATERIALITIES
+        and claim.extraction_status in CLAIM_EXTRACTION_STATUSES
     )
 
 
@@ -80,6 +82,9 @@ def extract_claims(revision: ArticleRevision, provider: AnalysisProvider) -> Ana
         raise ValueError("provider result revision_id does not match revision")
     if not all(_valid_claim(claim, revision) for claim in result.claims):
         raise ValueError("provider claim text or span is invalid")
+    spans = [(claim.start, claim.end) for claim in result.claims]
+    if len(set(spans)) != len(spans):
+        raise ValueError("duplicate claim span in provider result")
 
     candidates = tuple(
         candidate

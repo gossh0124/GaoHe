@@ -101,7 +101,15 @@ class GeminiAnalysisProvider:
         prompt = {
             "revision": {"id": revision.id, "title": revision.title[:MAX_PAGE_TITLE_CHARS], "text": revision.text[:MAX_ANALYSIS_CHARS]},
             "related": [{"id": item.id, "title": item.title[:MAX_PAGE_TITLE_CHARS], "text": item.text[:MAX_ANALYSIS_CHARS]} for item in related[:10]],
-            "response_schema": {"claims": "list", "candidates": "list"},
+            "instructions": (
+                "Return provider-neutral JSON only. Each claim must preserve the original claim text and exact [start,end) offsets "
+                "into revision.text. Each candidate must include its finding type, summary, materiality, and exact offsets. "
+                "Preserve original numeric wording with its unit, time, entity, and approximation context; do not retrieve evidence or search."
+            ),
+            "response_schema": {
+                "claims": {"required": ["text", "start", "end", "kind", "materiality"]},
+                "candidates": {"required": ["finding_type", "summary", "start", "end", "materiality"], "optional": ["claim_id", "query"]},
+            },
         }
         try:
             raw = self._request(self._model, prompt, self._api_key)

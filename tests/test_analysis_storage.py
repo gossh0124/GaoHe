@@ -48,6 +48,15 @@ def test_claims_validate_spans_and_reject_duplicate_analysis_spans(tmp_path: Pat
         store.save_claims(revision_id, [claim(revision_id)])
 
 
+@pytest.mark.parametrize("kind", ["checkable", "descriptive", "attributed_statement", "inference", "opinion"])
+def test_store_persists_the_shared_claim_kind_vocabulary(tmp_path: Path, kind: str):
+    store, revision_id = revision_store(tmp_path)
+
+    saved = store.save_claims(revision_id, [Claim(None, revision_id, "Normalized", 0, 10, kind, "ordinary", "extracted")])
+
+    assert saved == [1]
+
+
 def test_evidence_persists_success_and_failed_retrieval_attempts(tmp_path: Path):
     store, _ = revision_store(tmp_path)
 

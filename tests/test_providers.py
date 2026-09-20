@@ -52,6 +52,25 @@ def test_gemini_adapter_parses_strict_valid_json_and_redacts_failures():
     assert "super-secret" not in str(error.value)
 
 
+def test_gemini_request_requires_exact_claim_context_without_evidence_retrieval():
+    from gaohe.providers import GeminiAnalysisProvider
+
+    captured = []
+    provider = GeminiAnalysisProvider(
+        Settings(llm_provider="gemini", llm_model="gemini", llm_api_key="secret"),
+        request=lambda _model, prompt, _key: captured.append(prompt) or '{"claims":[],"candidates":[]}',
+    )
+
+    provider.analyze(revision(), ())
+
+    prompt = captured[0]
+    assert "original claim text" in prompt["instructions"]
+    assert "exact [start,end) offsets" in prompt["instructions"]
+    assert "unit, time, entity, and approximation context" in prompt["instructions"]
+    assert prompt["response_schema"]["claims"]["required"] == ["text", "start", "end", "kind", "materiality"]
+    assert prompt["response_schema"]["candidates"]["required"] == ["finding_type", "summary", "start", "end", "materiality"]
+
+
 @pytest.mark.parametrize("response", ["{}", '{"claims":"bad","candidates":[]}'])
 def test_gemini_adapter_rejects_invalid_shapes(response: str):
     from gaohe.providers import GeminiAnalysisProvider

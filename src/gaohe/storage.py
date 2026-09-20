@@ -8,7 +8,7 @@ import sqlite3
 from typing import Iterator, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .domain import ArticleRevision, Claim, Evidence, FetchedArticle, Finding, RunSummary, Source, TopicGroup, article_content_hash, normalize_article_content
+from .domain import CLAIM_EXTRACTION_STATUSES, CLAIM_KINDS, CLAIM_MATERIALITIES, ArticleRevision, Claim, Evidence, FetchedArticle, Finding, RunSummary, Source, TopicGroup, article_content_hash, normalize_article_content
 
 
 _SENSITIVE_NAME = r"(?:authorization|cookie|token|secret|password|session|api[-_]key)"
@@ -18,9 +18,6 @@ _SENSITIVE_FRAGMENT = re.compile(rf"(?i)(^|[?&])([^=&#\s]*{_SENSITIVE_NAME}[^=&#
 _SENSITIVE_VALUE = re.compile(r"(?i)\b(?:api[_-]?key|(?:access|refresh|client)[_-]?(?:token|secret)|token|secret|password|passwd|pwd|session(?:[_-]?id)?)\s*=\s*[^\s,;&]+")
 _BEARER_TOKEN = re.compile(r"(?i)bearer\s+[^\s,;]+")
 _PROVIDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-_CLAIM_KINDS = {"checkable", "descriptive"}
-_MATERIALITIES = {"ordinary", "material"}
-_EXTRACTION_STATUSES = {"extracted", "rejected"}
 _EVIDENCE_RELATIONS = {"supports", "contradicts", "context"}
 _EVIDENCE_STATUSES = {"pending", "retrieved", "retrieval_failed", "insufficient_scope"}
 _EVIDENCE_SOURCE_KINDS = {"direct", "search", "firecrawl", "related_article"}
@@ -371,9 +368,9 @@ class Store:
                     raise ValueError("claim revision_id must match revision_id")
                 if not 0 <= claim.start <= claim.end <= len(revision.text):
                     raise ValueError("claim span is outside the normalized article text")
-                _require_allowed("claim kind", claim.kind, _CLAIM_KINDS)
-                _require_allowed("claim materiality", claim.materiality, _MATERIALITIES)
-                _require_allowed("claim extraction_status", claim.extraction_status, _EXTRACTION_STATUSES)
+                _require_allowed("claim kind", claim.kind, CLAIM_KINDS)
+                _require_allowed("claim materiality", claim.materiality, CLAIM_MATERIALITIES)
+                _require_allowed("claim extraction_status", claim.extraction_status, CLAIM_EXTRACTION_STATUSES)
                 try:
                     cursor = connection.execute(
                         """INSERT INTO claims (revision_id, text, start, end, kind, materiality, extraction_status)
