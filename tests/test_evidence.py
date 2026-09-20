@@ -237,6 +237,20 @@ def test_analyze_revision_never_searches_a_prefixed_full_article_query():
     assert search.calls == []
 
 
+def test_analyze_revision_never_searches_a_suffixed_full_article_query():
+    from gaohe.analysis import analyze_revision
+
+    item = revision("The report says 100 units.")
+    stated = Claim(None, item.id, "100 units", 16, 25, "checkable", "material", "extracted")
+    proposed = FindingCandidate(None, "factual_contradiction", "Check", 16, 25, "material", f"{item.text} for verification", item.id)
+    search = Search((), [])
+
+    result = analyze_revision(item, (), Analysis(AnalysisResult(item.id, (stated,), (proposed,))), search, Fetcher({}, []))
+
+    assert result.evidence == ()
+    assert search.calls == []
+
+
 def test_retrieve_evidence_skips_malformed_hit_and_keeps_other_hits():
     from gaohe.analysis import retrieve_evidence
 
