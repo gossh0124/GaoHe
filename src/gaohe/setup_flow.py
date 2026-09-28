@@ -6,11 +6,12 @@ import os
 from pathlib import Path
 import tempfile
 from threading import Thread
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs
 import webbrowser
 
 from .config import Settings
 from .domain import Source
+from .safety import is_source_url as _is_source_url
 from .storage import Store
 
 
@@ -34,22 +35,6 @@ _SETUP_KEYS = {"LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY"}
 
 def _has_control(value: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in value)
-
-
-def _is_source_url(value: str) -> bool:
-    if any(character.isspace() for character in value):
-        return False
-    try:
-        parsed = urlsplit(value)
-        _ = parsed.port
-    except ValueError:
-        return False
-    return (
-        parsed.scheme in {"http", "https"}
-        and bool(parsed.hostname)
-        and parsed.username is None
-        and parsed.password is None
-    )
 
 
 def validate_setup_form(form: Mapping[str, str]) -> list[str]:

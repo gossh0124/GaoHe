@@ -6,18 +6,11 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Iterator, Sequence
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .safety import MAX_EVIDENCE_EXCERPT_CHARS, redact_text, redact_url, safe_error as _safe_error  # noqa: F401 - re-exported for callers
 from .domain import CLAIM_EXTRACTION_STATUSES, CLAIM_KINDS, CLAIM_MATERIALITIES, ArticleRevision, Claim, Evidence, FetchedArticle, Finding, RunSummary, Source, TopicGroup, article_content_hash, normalize_article_content
 
 
-_SENSITIVE_NAME = r"(?:authorization|cookie|token|secret|password|session|api[-_]key)"
-_SENSITIVE_HEADER = re.compile(rf"(?im)^[^\r\n:]*?{_SENSITIVE_NAME}[^\r\n:]*:\s*[^\r\n]*")
-_SENSITIVE_QUERY = re.compile(rf"(?i)([?&][^=&#\s]*{_SENSITIVE_NAME}[^=&#\s]*=)[^&#\s]*")
-_SENSITIVE_FRAGMENT = re.compile(rf"(?i)(^|[?&])([^=&#\s]*{_SENSITIVE_NAME}[^=&#\s]*=)[^&#\s]*")
-_SENSITIVE_VALUE = re.compile(rf"(?i)\b(?:{_SENSITIVE_NAME}|(?:access|refresh|client)[_-]?(?:token|secret)|passwd|pwd|session(?:[_-]?id)?)\s*=\s*[^\s,;&]+")
-_BEARER_TOKEN = re.compile(r"(?i)bearer\s+[^\s,;]+")
-MAX_EVIDENCE_EXCERPT_CHARS = 2_000
 _PROVIDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _EVIDENCE_RELATIONS = {"supports", "contradicts", "context"}
 _EVIDENCE_STATUSES = {"pending", "retrieved", "retrieval_failed", "insufficient_scope"}
@@ -38,35 +31,6 @@ def _utc_iso(value: str) -> str:
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise ValueError("timestamps must be UTC ISO-8601 strings")
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _safe_error(error: str | None) -> str | None:
-    if error is None:
-        return None
-    redacted = _SENSITIVE_HEADER.sub("[redacted]", error)
-    redacted = _SENSITIVE_QUERY.sub(r"\1[redacted]", redacted)
-    redacted = _SENSITIVE_VALUE.sub(lambda match: match.group(0).split("=", 1)[0] + "=[redacted]", redacted)
-    return _BEARER_TOKEN.sub("Bearer [redacted]", redacted)[:500]
-
-
-def redact_text(value: str, limit: int = MAX_EVIDENCE_EXCERPT_CHARS) -> str:
-    """Keep evidence excerpts bounded without persisting common credential forms."""
-    if not isinstance(value, str) or limit < 1:
-        return ""
-    redacted = _SENSITIVE_HEADER.sub("[redacted]", value)
-    redacted = _SENSITIVE_QUERY.sub(r"\1[redacted]", redacted)
-    redacted = _SENSITIVE_VALUE.sub(lambda match: match.group(0).split("=", 1)[0] + "=[redacted]", redacted)
-    return _BEARER_TOKEN.sub("Bearer [redacted]", redacted)[:limit]
-
-
-def redact_url(value: str) -> str:
-    parsed = urlsplit(value)
-    query = urlencode([
-        (key, "***" if re.search(_SENSITIVE_NAME, key, re.IGNORECASE) else query_value)
-        for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
-    ])
-    fragment = _SENSITIVE_FRAGMENT.sub(r"\1\2***", parsed.fragment)
-    return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, query, fragment))
 
 
 def _safe_provider_name(value: str | None) -> str | None:

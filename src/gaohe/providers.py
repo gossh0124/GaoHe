@@ -1,44 +1,20 @@
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 import json
 from typing import Protocol
-from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .config import Settings
-from .domain import ArticleRevision, Claim, Evidence, Finding, RetrievedPage, SearchHit, article_content_hash
+from .domain import MAX_QUERY_CHARS, MAX_SEARCH_LIMIT, AnalysisResult, ArticleRevision, Claim, FindingCandidate, RetrievedPage, SearchHit, article_content_hash
+from .safety import is_http_url as _is_http_url
 from .sources import HttpTransport, UrllibTransport, extract_article_text
 
 
-MAX_QUERY_CHARS = 500
-MAX_SEARCH_LIMIT = 10
 MAX_ANALYSIS_CHARS = 20_000
 MAX_PAGE_BYTES = 1_000_000
 MAX_PAGE_TEXT_CHARS = 200_000
 MAX_PAGE_TITLE_CHARS = 500
-
-
-@dataclass(frozen=True)
-class FindingCandidate:
-    claim_id: int | None
-    finding_type: str
-    summary: str
-    start: int
-    end: int
-    materiality: str
-    query: str | None
-    revision_id: int | None = None
-
-
-@dataclass(frozen=True)
-class AnalysisResult:
-    revision_id: int
-    claims: tuple[Claim, ...]
-    candidates: tuple[FindingCandidate, ...]
-    evidence: tuple[Evidence, ...] = ()
-    findings: tuple[Finding, ...] = ()
 
 
 class AnalysisProvider(Protocol):
@@ -51,11 +27,6 @@ class EvidenceSearchProvider(Protocol):
 
 class PageFetcher(Protocol):
     def fetch(self, url: str) -> RetrievedPage: ...
-
-
-def _is_http_url(value: str) -> bool:
-    parsed = urlparse(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _now() -> str:

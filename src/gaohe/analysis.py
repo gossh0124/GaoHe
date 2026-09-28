@@ -1,10 +1,9 @@
 from collections.abc import Sequence
 import re
-from urllib.parse import urlsplit, urlunsplit
 
-from .domain import CLAIM_EXTRACTION_STATUSES, CLAIM_KINDS, CLAIM_MATERIALITIES, ArticleRevision, Claim, Evidence, Finding, RetrievedPage, SearchHit, normalize_article_content
-from .providers import AnalysisProvider, AnalysisResult, EvidenceSearchProvider, FindingCandidate, MAX_QUERY_CHARS, MAX_SEARCH_LIMIT, PageFetcher
-from .storage import MAX_EVIDENCE_EXCERPT_CHARS, redact_text, redact_url
+from .domain import CLAIM_EXTRACTION_STATUSES, CLAIM_KINDS, CLAIM_MATERIALITIES, MAX_QUERY_CHARS, MAX_SEARCH_LIMIT, AnalysisResult, ArticleRevision, Claim, Evidence, Finding, FindingCandidate, RetrievedPage, SearchHit, normalize_article_content
+from .providers import AnalysisProvider, EvidenceSearchProvider, PageFetcher
+from .safety import MAX_EVIDENCE_EXCERPT_CHARS, canonical_url as _canonical_url, redact_text, redact_url
 
 
 _ALLOWED_FINDING_TYPES = frozenset({
@@ -98,16 +97,6 @@ def extract_claims(revision: ArticleRevision, provider: AnalysisProvider, relate
         and _has_claim_association(candidate, result.claims, revision)
     )
     return AnalysisResult(revision.id, result.claims, candidates)
-
-
-def _canonical_url(url: str) -> str | None:
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return None
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-        return None
-    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, parsed.query, ""))
 
 
 def _query(candidate: FindingCandidate, revision: ArticleRevision | None = None) -> str:

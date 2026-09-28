@@ -5,11 +5,12 @@ from html.parser import HTMLParser
 import re
 from typing import Protocol
 from urllib.error import HTTPError
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
 from .domain import ArticleCandidate
+from .safety import is_http_url as _is_http_url
 
 
 MAX_RESPONSE_BYTES = 1_000_000
@@ -51,11 +52,6 @@ class UrllibTransport:
             key: value for key, value in headers.items() if key.lower() not in {"authorization", "proxy-authorization"}
         }
         return HttpResponse(status, url, safe_headers, body if len(body) <= MAX_RESPONSE_BYTES else b"")
-
-
-def _is_http_url(value: str) -> bool:
-    parsed = urlparse(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _text(value: str | None) -> str:

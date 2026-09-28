@@ -3,7 +3,6 @@ from collections.abc import Sequence
 from pathlib import Path
 import sqlite3
 import sys
-from urllib.parse import urlsplit
 
 from . import __version__
 from .config import Settings, load_settings
@@ -12,7 +11,8 @@ from .analysis import analyze_revision, extract_claims, resolve_finding
 from .monitor import watch_once
 from .providers import AnalysisResult, DirectPageFetcher, build_analysis_provider, build_search_provider
 from .sources import UrllibTransport
-from .storage import MAX_EVIDENCE_EXCERPT_CHARS, Store, redact_text, redact_url
+from .safety import MAX_EVIDENCE_EXCERPT_CHARS, is_http_url as _is_http_url, redact_text, redact_url
+from .storage import Store
 from .topics import compare_topic, group_revision
 from .web import serve
 from .setup_flow import run_setup_wizard
@@ -69,11 +69,6 @@ def _store(settings: Settings) -> Store:
     store = Store(settings.database_path)
     store.initialize()
     return store
-
-
-def _is_http_url(value: str) -> bool:
-    parsed = urlsplit(value)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 class _StaticAnalysis:

@@ -6,8 +6,8 @@ import math
 import re
 from urllib.parse import urlsplit, urlunsplit
 
-from .domain import ArticleRevision, TopicGroup
-from .providers import FindingCandidate, MAX_QUERY_CHARS
+from .domain import MAX_QUERY_CHARS, ArticleRevision, FindingCandidate, TopicGroup
+from .safety import is_credential_free_http_url
 
 
 TOPIC_WINDOW_HOURS = 72
@@ -45,12 +45,9 @@ def _host(url: str) -> str:
 
 
 def _safe_url(url: str) -> str:
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
+    if not is_credential_free_http_url(url):
         return ""
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-        return ""
+    parsed = urlsplit(url)
     return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path, "", ""))[:200]
 
 

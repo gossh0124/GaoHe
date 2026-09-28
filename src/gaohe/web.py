@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlsplit
 
 from .config import Settings, load_settings
 from .domain import Finding
-from .storage import redact_text, redact_url
+from .safety import is_credential_free_http_url, redact_text, redact_url
 
 if TYPE_CHECKING:
     from .storage import Store
@@ -84,12 +84,10 @@ def _evidence_link(item: object) -> str:
     url = _value(item, "url", _value(item, "source_url", ""))
     if not isinstance(url, str):
         return ""
-    try:
-        parsed = urlsplit(url)
-        valid = parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password
-    except ValueError:
-        valid = False
-    if not valid or any(_SENSITIVE_METADATA.search(_decode_to_stable(value)) for value in (parsed.query, parsed.fragment)):
+    if not is_credential_free_http_url(url):
+        return ""
+    parsed = urlsplit(url)
+    if any(_SENSITIVE_METADATA.search(_decode_to_stable(value)) for value in (parsed.query, parsed.fragment)):
         return ""
     safe_url = redact_url(url)
     title = _text(_safe_metadata(_value(item, "title", _value(item, "name", "Evidence"))) or "Evidence")

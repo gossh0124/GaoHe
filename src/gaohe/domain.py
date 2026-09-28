@@ -6,6 +6,8 @@ import unicodedata
 CLAIM_KINDS = frozenset({"checkable", "descriptive", "attributed_statement", "inference", "opinion"})
 CLAIM_MATERIALITIES = frozenset({"ordinary", "material"})
 CLAIM_EXTRACTION_STATUSES = frozenset({"extracted", "rejected"})
+MAX_QUERY_CHARS = 500
+MAX_SEARCH_LIMIT = 10
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,27 @@ class Finding:
     status: str
     evidence_status: str
     visible: bool
+
+
+@dataclass(frozen=True)
+class FindingCandidate:
+    claim_id: int | None
+    finding_type: str
+    summary: str
+    start: int
+    end: int
+    materiality: str
+    query: str | None
+    revision_id: int | None = None
+
+
+@dataclass(frozen=True)
+class AnalysisResult:
+    revision_id: int
+    claims: tuple[Claim, ...]
+    candidates: tuple[FindingCandidate, ...]
+    evidence: tuple[Evidence, ...] = ()
+    findings: tuple[Finding, ...] = ()
 
 
 @dataclass(frozen=True)

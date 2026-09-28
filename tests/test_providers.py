@@ -141,7 +141,8 @@ def test_direct_page_fetcher_extracts_text_hash_and_uses_no_fallback_on_success(
     from gaohe.providers import DirectPageFetcher
 
     direct = FakeTransport(HttpResponse(200, "https://evidence.test/article", {"Content-Type": "text/html"}, b"<title>Evidence</title><main><p>Useful text</p></main>"))
-    fallback = lambda _url: pytest.fail("fallback must not run")
+    def fallback(_url):
+        pytest.fail("fallback must not run")
 
     page = DirectPageFetcher(direct, fallback=fallback, firecrawl_api_key="key").fetch("https://evidence.test/article")
 
@@ -190,14 +191,15 @@ def test_direct_fetcher_uses_injected_firecrawl_fallback_only_with_key():
 def test_direct_fetcher_normalizes_fallback_page_and_recomputes_hash():
     from gaohe.providers import DirectPageFetcher, MAX_PAGE_TEXT_CHARS, MAX_PAGE_TITLE_CHARS
 
-    fallback = lambda _url: RetrievedPage(
-        "https://fallback.test/article",
-        "T" * (MAX_PAGE_TITLE_CHARS + 1),
-        "X" * (MAX_PAGE_TEXT_CHARS + 1),
-        "2000-01-01T00:00:00Z",
-        "retrieved",
-        "forged-hash",
-    )
+    def fallback(_url):
+        return RetrievedPage(
+            "https://fallback.test/article",
+            "T" * (MAX_PAGE_TITLE_CHARS + 1),
+            "X" * (MAX_PAGE_TEXT_CHARS + 1),
+            "2000-01-01T00:00:00Z",
+            "retrieved",
+            "forged-hash",
+        )
     page = DirectPageFetcher(FakeTransport(HttpResponse(503, "https://evidence.test/article", {}, b"")), fallback=fallback, firecrawl_api_key="secret").fetch("https://evidence.test/article")
 
     assert (page.status, len(page.title), len(page.text)) == ("retrieved", MAX_PAGE_TITLE_CHARS, MAX_PAGE_TEXT_CHARS)
