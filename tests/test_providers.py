@@ -52,23 +52,31 @@ def test_gemini_adapter_parses_strict_valid_json_and_redacts_failures():
     assert "super-secret" not in str(error.value)
 
 
-def test_gemini_request_requires_exact_claim_context_without_evidence_retrieval():
+def test_gemini_request_asks_for_verbatim_quotes_with_structured_output_and_no_retrieval():
     from gaohe.providers import GeminiAnalysisProvider
 
     captured = []
     provider = GeminiAnalysisProvider(
         Settings(llm_provider="gemini", llm_model="gemini", llm_api_key="secret"),
-        request=lambda _model, prompt, _key: captured.append(prompt) or '{"claims":[],"candidates":[]}',
+        request=lambda _model, payload, _key: captured.append(payload) or '{"claims":[],"candidates":[]}',
     )
 
     provider.analyze(revision(), ())
 
-    prompt = captured[0]
-    assert "original claim text" in prompt["instructions"]
-    assert "exact [start,end) offsets" in prompt["instructions"]
-    assert "unit, time, entity, and approximation context" in prompt["instructions"]
-    assert prompt["response_schema"]["claims"]["required"] == ["text", "start", "end", "kind", "materiality"]
-    assert prompt["response_schema"]["candidates"]["required"] == ["finding_type", "summary", "start", "end", "materiality"]
+    payload = captured[0]
+    instructions = payload["systemInstruction"]["parts"][0]["text"]
+    assert "verbatim" in instructions
+    assert "Do not search, browse, retrieve evidence" in instructions
+    assert "unit, time, entity, and approximation" in instructions
+    assert "近500位" in instructions and "約500人" in instructions
+    assert "Opinions and descriptions are never material" in instructions
+    for finding_type in ("factual_contradiction", "material_cross_media_difference", "unsupported_inference"):
+        assert finding_type in instructions
+    assert "untrusted data" in instructions
+    schema = payload["generationConfig"]["responseSchema"]
+    assert schema["properties"]["claims"]["items"]["required"] == ["quote", "kind", "materiality"]
+    assert schema["properties"]["candidates"]["items"]["required"] == ["claim_index", "finding_type", "summary", "materiality"]
+    assert "start" not in schema["properties"]["claims"]["items"]["properties"]
 
 
 @pytest.mark.parametrize("response", ["{}", '{"claims":"bad","candidates":[]}'])
@@ -122,7 +130,8 @@ def test_gemini_post_keeps_key_out_of_url_headers_and_public_error():
     assert "super-secret" not in url
     assert "?key=" not in url
     assert headers["X-goog-api-key"] == "super-secret"
-    assert timeout == 20
+    assert timeout == 60
+    assert error.value.__context__ is None
     assert "super-secret" not in str(error.value)
     assert error.value.__cause__ is None
 
@@ -252,3 +261,35 @@ def test_null_search_rejects_non_positive_limits(limit):
 
     with pytest.raises(ValueError, match="Search limit"):
         NullSearchProvider().search("bounded query", limit=limit)
+
+
+def test_direct_page_fetcher_marks_direct_and_fallback_pages_with_how_they_were_fetched():
+    from gaohe.providers import DirectPageFetcher
+
+    body = b"<title>E</title><main><p>Direct text</p></main>"
+    direct = FakeTransport(HttpResponse(200, "https://evidence.test/article", {"Content-Type": "text/html"}, body))
+    failing = FakeTransport(HttpResponse(503, "https://evidence.test/article", {}, b""))
+
+    assert DirectPageFetcher(direct).fetch("https://evidence.test/article").fetched_via == "direct"
+    fallback = DirectPageFetcher(failing, fallback=lambda _url: ("Fallback", "Fallback text"), firecrawl_api_key="secret")
+    assert fallback.fetch("https://evidence.test/article").fetched_via == "firecrawl"
+
+
+def test_fallback_page_object_is_marked_firecrawl_even_if_it_claims_direct():
+    from gaohe.providers import DirectPageFetcher
+
+    def fallback(_url):
+        return RetrievedPage("https://fallback.test/article", "Title", "Text", "", "retrieved", None, fetched_via="direct")
+
+    fetcher = DirectPageFetcher(FakeTransport(TimeoutError()), fallback=fallback, firecrawl_api_key="secret")
+    page = fetcher.fetch("https://evidence.test/article")
+
+    assert (page.status, page.fetched_via) == ("retrieved", "firecrawl")
+
+
+def test_firecrawl_fetcher_marks_pages_as_firecrawl():
+    from gaohe.providers import FirecrawlPageFetcher
+
+    page = FirecrawlPageFetcher("secret", lambda *_args: ("Title", "Scraped text")).fetch("https://evidence.test/article")
+
+    assert (page.status, page.fetched_via) == ("retrieved", "firecrawl")

@@ -60,7 +60,7 @@ def test_extract_claims_keeps_an_explicit_material_candidate_pending_without_vis
     assert result.evidence == ()
 
 
-def test_extract_claims_rejects_duplicate_valid_claim_spans_before_persistence():
+def test_extract_claims_drops_duplicate_valid_claim_spans_before_persistence():
     from gaohe.analysis import extract_claims
 
     item = revision("The verified wording.")
@@ -69,8 +69,10 @@ def test_extract_claims_rejects_duplicate_valid_claim_spans_before_persistence()
         claim(item, "The verified wording", claim_id=12),
     )
 
-    with pytest.raises(ValueError, match="duplicate claim span"):
-        extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, duplicate, ())))
+    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, duplicate, ())))
+
+    assert result.claims == (duplicate[0],)
+    assert result.rejected_claims == 1
 
 
 @pytest.mark.parametrize("kind", ["checkable", "descriptive", "attributed_statement", "inference", "opinion"])
@@ -87,14 +89,16 @@ def test_extract_claims_accepts_each_store_persistable_claim_kind(kind):
     ("kind", "materiality", "extraction_status"),
     [("unsupported", "ordinary", "extracted"), ("checkable", "unsupported", "extracted"), ("checkable", "ordinary", "unsupported")],
 )
-def test_extract_claims_rejects_unbounded_claim_fields(kind, materiality, extraction_status):
+def test_extract_claims_drops_unbounded_claim_fields(kind, materiality, extraction_status):
     from gaohe.analysis import extract_claims
 
     item = revision("The verified wording.")
-    stated = Claim(None, item.id, "The verified wording", 0, len(item.text), kind, materiality, extraction_status)
+    stated = Claim(None, item.id, "The verified wording", 0, len("The verified wording"), kind, materiality, extraction_status)
 
-    with pytest.raises(ValueError, match="claim text or span"):
-        extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), ())))
+    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), ())))
+
+    assert result.claims == ()
+    assert result.rejected_claims == 1
 
 
 @pytest.mark.parametrize(
@@ -151,16 +155,19 @@ def test_allowed_finding_type_rejects_everything_else(value):
     assert allowed_finding_type(value) is False
 
 
-def test_extract_claims_rejects_provider_revision_or_claim_text_mismatch():
+def test_extract_claims_rejects_revision_mismatch_but_drops_claim_text_mismatch():
     from gaohe.analysis import extract_claims
 
     item = revision("The verified wording.")
     mismatch = Claim(None, item.id, "Different wording", 0, len("The verified wording"), "checkable", "material", "extracted")
+    tied = FindingCandidate(None, "factual_contradiction", "Check", 0, len("The verified wording"), "material", None)
 
     with pytest.raises(ValueError, match="revision_id"):
         extract_claims(item, FakeAnalysisProvider(AnalysisResult(8, (), ())))
-    with pytest.raises(ValueError, match="claim text"):
-        extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (mismatch,), ())))
+    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (mismatch,), (tied,))))
+    assert result.claims == ()
+    assert result.candidates == ()
+    assert result.rejected_claims == 1
 
 
 def test_tone_only_ordinary_proposal_stays_pre_evidence_and_has_no_visible_output():
@@ -192,11 +199,118 @@ def test_approximate_450_500_520_claims_remain_background_until_task_4_or_5_reso
     assert result.candidates == ()
 
 
-def test_extract_claims_rejects_ambiguous_duplicate_span_association():
+def test_extract_claims_keeps_the_first_of_duplicate_spans_and_drops_candidates_tied_to_the_duplicate():
     from gaohe.analysis import extract_claims
 
     item = revision("The verified wording.")
     first = claim(item, "The verified wording", claim_id=11)
     duplicate = claim(item, "The verified wording", claim_id=12)
-    with pytest.raises(ValueError, match="duplicate claim span"):
-        extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (first, duplicate), ())))
+    to_first = candidate(item, first.text, claim_id=11)
+    to_duplicate = candidate(item, first.text, claim_id=12)
+
+    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (first, duplicate), (to_first, to_duplicate))))
+
+    assert result.claims == (first,)
+    assert result.candidates == (to_first,)
+    assert result.rejected_claims == 1
+
+
+def test_extract_claims_drops_bad_claims_and_their_candidates_and_counts_every_rejection():
+    from gaohe.analysis import extract_claims
+
+    item = revision("部長表示補助 1,000 萬元。報告指出共 30 所學校受惠。")
+    kept = claim(item, "部長表示補助 1,000 萬元", kind="attributed_statement")
+    other = claim(item, "報告指出共 30 所學校受惠")
+    bad_span = Claim(None, item.id, "報告指出共 30 所學校受惠", 0, 5, "checkable", "material", "extracted")
+    bad_kind = Claim(None, item.id, other.text, other.start, other.end, "rumour", "material", "extracted")
+    wrong_revision = Claim(None, 99, other.text, other.start, other.end, "checkable", "material", "extracted")
+    duplicate = claim(item, kept.text)
+    whitespace = Claim(None, item.id, " ", item.text.index(" "), item.text.index(" ") + 1, "checkable", "material", "extracted")
+    not_a_claim = "not a claim"
+    kept_candidate = candidate(item, kept.text)
+    orphan_candidate = FindingCandidate(None, "factual_contradiction", "Tied to a dropped span", 0, 5, "material", None)
+    provider = FakeAnalysisProvider(AnalysisResult(
+        item.id,
+        (kept, bad_span, bad_kind, wrong_revision, duplicate, whitespace, not_a_claim),
+        (kept_candidate, orphan_candidate),
+        rejected_claims=2,
+    ))
+
+    result = extract_claims(item, provider)
+
+    assert result.claims == (kept,)
+    assert result.candidates == (kept_candidate,)
+    # Two rejected by the provider while anchoring, six more by validation.
+    assert result.rejected_claims == 8
+    assert result.evidence == ()
+    assert result.findings == ()
+
+
+def test_extract_claims_counts_zero_rejections_for_a_clean_result():
+    from gaohe.analysis import extract_claims
+
+    item = revision("The verified wording.")
+    stated = claim(item, "The verified wording")
+
+    assert extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), ()))).rejected_claims == 0
+
+
+@pytest.mark.parametrize("reported", [-3, True, "2", None])
+def test_extract_claims_ignores_nonsense_provider_rejection_counts(reported):
+    from gaohe.analysis import extract_claims
+
+    item = revision("The verified wording.")
+    stated = claim(item, "The verified wording")
+    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), (), rejected_claims=reported)))
+
+    assert result.rejected_claims == 0
+
+
+def test_extract_claims_still_raises_for_non_normalized_revision_text():
+    from gaohe.analysis import extract_claims
+
+    item = ArticleRevision(7, 3, "https://news.test/article", "Article", "Line one.\r\nLine two.", "hash", "2026-09-20T00:00:00Z")
+    provider = FakeAnalysisProvider(AnalysisResult(item.id, (), ()))
+
+    with pytest.raises(ValueError, match="normalized"):
+        extract_claims(item, provider)
+    assert provider.calls == 0
+
+
+def test_extract_claims_drops_candidates_that_are_not_finding_candidates():
+    from gaohe.analysis import extract_claims
+
+    item = revision("The verified wording.")
+    stated = claim(item, "The verified wording")
+
+    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), ("junk", None))))
+
+    assert result.claims == (stated,)
+    assert result.candidates == ()
+
+
+def test_extract_claims_anchors_a_whole_gemini_response_and_drops_only_the_unlocatable_claim():
+    from gaohe.analysis import extract_claims
+    from gaohe.config import Settings
+    from gaohe.providers import GeminiAnalysisProvider
+
+    item = revision("邀集近 500 位\n國內外官員。部長表示補助 1,000 萬元。")
+    response = (
+        '{"claims":['
+        '{"quote":"邀集近 500 位 國內外官員","kind":"descriptive","materiality":"ordinary"},'
+        '{"quote":"部長表示補助 1,000 萬元","kind":"attributed_statement","materiality":"material"},'
+        '{"quote":"部長表示補助 2,000 萬元","kind":"attributed_statement","materiality":"material"}],'
+        '"candidates":['
+        '{"claim_index":1,"finding_type":"factual_contradiction","summary":"核對補助金額","materiality":"material"},'
+        '{"claim_index":2,"finding_type":"factual_contradiction","summary":"Dropped claim","materiality":"material"}]}'
+    )
+    provider = GeminiAnalysisProvider(Settings(llm_provider="gemini", llm_model="m", llm_api_key="k"), request=lambda *_args: response)
+
+    result = extract_claims(item, provider)
+
+    assert [value.text for value in result.claims] == ["邀集近 500 位\n國內外官員", "部長表示補助 1,000 萬元"]
+    assert all(item.text[value.start:value.end] == value.text for value in result.claims)
+    assert [(value.summary, value.start, value.end) for value in result.candidates] == [
+        ("核對補助金額", result.claims[1].start, result.claims[1].end),
+    ]
+    assert result.rejected_claims == 1

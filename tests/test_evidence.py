@@ -1,6 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
-from gaohe.domain import ArticleRevision, Claim, Evidence, RetrievedPage, SearchHit, article_content_hash
+from gaohe.domain import ArticleRevision, Claim, Evidence, EvidenceAssessment, RetrievedPage, SearchHit, article_content_hash
 from gaohe.providers import AnalysisResult, FindingCandidate
 
 
@@ -34,12 +34,16 @@ class Fetcher:
         return self.pages[url]
 
 
-def page(url, text="Official record: 200 units.", status="retrieved"):
-    return RetrievedPage(url, "Official record", text, "2026-09-20T01:00:00Z", status, article_content_hash("Official record", text) if text else None)
+def page(url, text="Official record: 200 units.", status="retrieved", fetched_via="direct"):
+    content_hash = article_content_hash("Official record", text) if text else None
+    return RetrievedPage(url, "Official record", text, "2026-09-20T01:00:00Z", status, content_hash, fetched_via)
 
 
-def evidence(status="retrieved", relation="contradicts", source_kind="search"):
-    return Evidence(None, None, "https://record.test/a", "Record", "200 units", relation, status, source_kind, "2026-09-20T01:00:00Z", "official", "2026-09-19T00:00:00Z", "hash")
+def evidence(status="retrieved", relation="contradicts", source_kind="direct", rationale="The record says 200 units."):
+    return Evidence(
+        None, None, "https://record.test/a", "Record", "200 units", relation, status, source_kind,
+        "2026-09-20T01:00:00Z", "official", "2026-09-19T00:00:00Z", "hash", rationale,
+    )
 
 
 def test_retrieve_evidence_bounds_query_deduplicates_urls_and_requires_full_text():
@@ -65,6 +69,7 @@ def test_retrieve_evidence_bounds_query_deduplicates_urls_and_requires_full_text
     assert result[0].excerpt == "Official record: 200 units."
     assert result[1].excerpt == ""
     assert result[0].relation == "context"
+    assert [(item.source_kind, item.rationale) for item in result] == [("direct", None), ("search", None)]
 
 
 def test_retrieve_evidence_maps_timeout_http_and_firecrawl_results_without_snippet_evidence():
@@ -76,12 +81,19 @@ def test_retrieve_evidence_maps_timeout_http_and_firecrawl_results_without_snipp
     http = "https://record.test/http"
     fallback = "https://record.test/fallback"
     search = Search(tuple(SearchHit(url, "Title", "discovery only", "search", None) for url in (timeout, http, fallback)), [])
-    fetcher = Fetcher({timeout: page(timeout, "", "timeout"), http: page(http, "", "http_error"), fallback: page(fallback, "Fallback text")}, [])
+    pages = {
+        timeout: page(timeout, "", "timeout"),
+        http: page(http, "", "http_error"),
+        fallback: page(fallback, "Fallback text", fetched_via="firecrawl"),
+    }
+    fetcher = Fetcher(pages, [])
 
     result = retrieve_evidence(proposed, search, fetcher)
 
     assert [item.status for item in result] == ["retrieval_failed", "retrieval_failed", "retrieved"]
     assert [item.excerpt for item in result] == ["", "", "Fallback text"]
+    assert [item.source_kind for item in result] == ["search", "search", "firecrawl"]
+    assert [item.provider for item in result] == ["search", "search", "search"]
     assert all("discovery only" not in item.excerpt for item in result)
 
 
@@ -94,8 +106,12 @@ def test_resolve_finding_is_visible_only_for_required_full_text_relations():
     visible = resolve_finding(proposed, [evidence()], ())
     assert visible.visible is True
     assert visible.status == "resolved"
+    assert resolve_finding(proposed, [evidence(source_kind="firecrawl")], ()).visible is True
     assert resolve_finding(proposed, [evidence(relation="supports")], ()).visible is False
     assert resolve_finding(proposed, [evidence(status="retrieval_failed")], ()).visible is False
+    # A search lead or an unassessed page never carries a contradiction.
+    assert resolve_finding(proposed, [evidence(source_kind="search")], ()).visible is False
+    assert resolve_finding(proposed, [evidence(rationale=None)], ()).visible is False
     assert resolve_finding(proposed, [], ()).evidence_status == "pending"
 
 
@@ -106,11 +122,16 @@ def test_cross_media_and_inference_require_their_specific_evidence():
     cross_media = candidate(item, "material_cross_media_difference")
     related = revision("Related article", revision_id=8)
     assert resolve_finding(cross_media, [evidence(source_kind="related_article")], ()).visible is False
-    linked = Evidence(None, None, related.url, "Record", "200 units", "contradicts", "retrieved", "related_article", "2026-09-20T01:00:00Z", "official", None, "hash")
+    linked = Evidence(
+        None, None, related.url, "Record", "200 units", "contradicts", "retrieved", "related_article",
+        "2026-09-20T01:00:00Z", "official", None, "hash", "The peer reports 200 units.",
+    )
     assert resolve_finding(cross_media, [linked], (related,)).visible is True
+    assert resolve_finding(cross_media, [replace(linked, rationale=None)], (related,)).visible is False
     inference = candidate(item, "unsupported_inference")
     assert resolve_finding(inference, [evidence(relation="supports")], ()).visible is False
     assert resolve_finding(inference, [evidence(relation="context", source_kind="direct")], ()).visible is True
+    assert resolve_finding(inference, [evidence(relation="context", source_kind="search")], ()).visible is False
 
 
 def test_retrieval_alone_never_supplies_the_explicit_limiting_relation():
@@ -274,3 +295,184 @@ def test_retrieve_evidence_records_each_fetch_failure_against_its_own_hit():
     result = retrieve_evidence(candidate(item), search, Fetcher({safe: page(safe)}, []))
 
     assert [(item.url, item.status) for item in result] == [(failed, "retrieval_failed"), (safe, "retrieved")]
+
+
+def test_retrieve_evidence_does_not_trust_an_unknown_fetch_path_as_full_text():
+    from gaohe.analysis import retrieve_evidence
+
+    item = revision()
+    url = "https://record.test/cache"
+    search = Search((SearchHit(url, "Cached", "", "official", None),), [])
+
+    (result,) = retrieve_evidence(candidate(item), search, Fetcher({url: page(url, fetched_via="cache")}, []))
+
+    assert (result.status, result.source_kind, result.provider) == ("retrieved", "search", "official")
+
+
+# --- end to end: extract -> retrieve -> assess -> resolve -----------------------------------------------
+
+
+ARTICLE = "市府表示補助 1,000 萬元。市長稱此舉必將帶動觀光。報導指出共 30 所學校受惠。"
+OFFICIAL = "https://gov.test/budget"
+LEAD = "https://blog.test/schools"
+SUPPORT = "https://other.test/budget"
+
+
+def e2e_revision():
+    return revision(ARTICLE, revision_id=21)
+
+
+def e2e_analysis(item):
+    def claim(text, kind="checkable", materiality="material"):
+        start = item.text.index(text)
+        return Claim(None, item.id, text, start, start + len(text), kind, materiality, "extracted")
+
+    def check(stated, summary, query):
+        return FindingCandidate(None, "factual_contradiction", summary, stated.start, stated.end, "material", query)
+
+    subsidy = claim("市府表示補助 1,000 萬元", "attributed_statement")
+    ordinary = claim("市長稱此舉必將帶動觀光", "opinion", "ordinary")
+    schools = claim("報導指出共 30 所學校受惠")
+    bad = Claim(None, item.id, "invented", 0, 3, "checkable", "material", "extracted")
+    candidates = (check(subsidy, "核對補助金額", "市府 補助 預算"), check(schools, "核對受惠學校數", "受惠 學校 名單"))
+    return Analysis(AnalysisResult(item.id, (subsidy, ordinary, schools, bad), candidates, rejected_claims=1))
+
+
+@dataclass
+class RoutedSearch:
+    routes: dict[str, tuple[SearchHit, ...]]
+    calls: list[str] = field(default_factory=list)
+
+    def search(self, query, limit=5):
+        self.calls.append(query)
+        return self.routes.get(query, ())
+
+
+class LookupFetcher:
+    """Fetches from a fixed page table; any other URL fails like a blocked page."""
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+
+    def fetch(self, url):
+        self.calls.append(url)
+        if url not in self.pages:
+            raise RuntimeError("403 forbidden")
+        return self.pages[url]
+
+
+@dataclass
+class ScriptedAssessor:
+    answers: dict[str, EvidenceAssessment]
+    calls: list[tuple[str, str, str]] = field(default_factory=list)
+
+    def assess(self, claim_text, item, record, finding_type):
+        self.calls.append((claim_text, record.url, finding_type))
+        return self.answers.get(record.url)
+
+
+def e2e_search(*budget_urls):
+    return RoutedSearch({
+        "市府 補助 預算": tuple(SearchHit(url, "Budget", "補助 100 萬元", "gov", None) for url in budget_urls),
+        # The snippet itself "contradicts", but a snippet is only a lead.
+        "受惠 學校 名單": (SearchHit(LEAD, "Schools", "僅 3 所學校受惠，與報導的 30 所不同", "blog", None),),
+    })
+
+
+def e2e_pages():
+    return {
+        OFFICIAL: page(OFFICIAL, "預算書：本案補助 100 萬元。"),
+        SUPPORT: page(SUPPORT, "另一份文件：補助 1,000 萬元。", fetched_via="firecrawl"),
+    }
+
+
+CONTRADICTS = EvidenceAssessment("contradicts", "預算書記載補助 100 萬元，而非 1,000 萬元。", "本案補助 100 萬元")
+
+
+def test_analyze_revision_makes_exactly_one_contradiction_visible_and_keeps_a_snippet_only_candidate_pending():
+    from gaohe.analysis import analyze_revision
+
+    item = e2e_revision()
+    search = e2e_search(OFFICIAL)
+    fetcher = LookupFetcher(e2e_pages())
+    assessor = ScriptedAssessor({OFFICIAL: CONTRADICTS, LEAD: CONTRADICTS})
+
+    result = analyze_revision(item, (), e2e_analysis(item), search, fetcher, assessor)
+
+    assert [claim.text for claim in result.claims] == [
+        "市府表示補助 1,000 萬元", "市長稱此舉必將帶動觀光", "報導指出共 30 所學校受惠",
+    ]
+    assert result.rejected_claims == 2
+    assert [finding.visible for finding in result.findings] == [True, False]
+    visible, pending = result.findings
+    assert (visible.finding_type, visible.status, visible.evidence_status) == ("factual_contradiction", "resolved", "retrieved")
+    assert item.text[visible.start:visible.end] == "市府表示補助 1,000 萬元"
+    assert (pending.status, pending.evidence_status) == ("pending", "retrieval_failed")
+    assert all(finding.revision_id == item.id for finding in result.findings)
+    official, lead = result.evidence
+    assert (official.relation, official.source_kind, official.provider) == ("contradicts", "direct", "gov")
+    assert official.rationale == CONTRADICTS.rationale
+    assert (lead.relation, lead.status, lead.source_kind) == ("context", "retrieval_failed", "search")
+    assert (lead.excerpt, lead.rationale) == ("", None)
+    assert all("3 所學校" not in record.excerpt for record in result.evidence)
+    # The assessor saw the located claim text and was never shown the unreadable lead.
+    assert assessor.calls == [("市府表示補助 1,000 萬元", OFFICIAL, "factual_contradiction")]
+    assert fetcher.calls == [OFFICIAL, LEAD]
+
+
+def test_analyze_revision_without_an_assessor_shows_nothing():
+    from gaohe.analysis import analyze_revision
+
+    item = e2e_revision()
+
+    result = analyze_revision(item, (), e2e_analysis(item), e2e_search(OFFICIAL), LookupFetcher(e2e_pages()))
+
+    assert [finding.visible for finding in result.findings] == [False, False]
+    assert result.evidence[0].status == "retrieved"
+    assert (result.evidence[0].relation, result.evidence[0].rationale) == ("context", None)
+
+
+def test_analyze_revision_keeps_conflicting_sources_pending_for_human_reading():
+    from gaohe.analysis import analyze_revision
+
+    item = e2e_revision()
+    supports = EvidenceAssessment("supports", "文件記載補助 1,000 萬元。", "補助 1,000 萬元")
+    assessor = ScriptedAssessor({OFFICIAL: CONTRADICTS, SUPPORT: supports})
+
+    result = analyze_revision(item, (), e2e_analysis(item), e2e_search(OFFICIAL, SUPPORT), LookupFetcher(e2e_pages()), assessor)
+
+    first = result.findings[0]
+    assert (first.visible, first.status, first.evidence_status) == (False, "pending", "retrieved")
+    assert [(record.relation, record.source_kind) for record in result.evidence[:2]] == [
+        ("contradicts", "direct"), ("supports", "firecrawl"),
+    ]
+
+
+def test_analyze_revision_keeps_an_ungrounded_contradiction_unassessed():
+    from gaohe.analysis import analyze_revision
+
+    item = e2e_revision()
+    fabricated = EvidenceAssessment("contradicts", "頁面說補助 5 萬元。", "本案補助 5 萬元")
+
+    assessor = ScriptedAssessor({OFFICIAL: fabricated})
+
+    result = analyze_revision(item, (), e2e_analysis(item), e2e_search(OFFICIAL), LookupFetcher(e2e_pages()), assessor)
+
+    assert result.findings[0].visible is False
+    assert (result.evidence[0].relation, result.evidence[0].rationale) == ("context", None)
+
+
+def test_analyze_revision_survives_an_assessor_that_always_fails():
+    from gaohe.analysis import analyze_revision
+
+    class Broken:
+        def assess(self, *_args):
+            raise ValueError("Gemini assessment request failed (HTTP 503)")
+
+    item = e2e_revision()
+
+    result = analyze_revision(item, (), e2e_analysis(item), e2e_search(OFFICIAL), LookupFetcher(e2e_pages()), Broken())
+
+    assert [finding.visible for finding in result.findings] == [False, False]
+    assert len(result.findings) == 2
