@@ -147,6 +147,7 @@ class AnalysisResult:
     candidates: tuple[FindingCandidate, ...]
     evidence: tuple[Evidence, ...] = ()
     findings: tuple[Finding, ...] = ()
+    rejected_claims: int = 0
 
 
 @dataclass(frozen=True)
