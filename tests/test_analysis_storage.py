@@ -123,6 +123,37 @@ def test_save_evidence_redacts_authorization_and_cookie_values_at_database_bound
     assert excerpt == "authorization=[redacted] cookie=[redacted] ordinary text"
 
 
+def test_evidence_rationale_is_redacted_bounded_and_kept_for_failed_retrieval(tmp_path: Path):
+    store, _ = revision_store(tmp_path)
+    base = Evidence(None, None, "https://evidence.test/a", "A", "", "context", "retrieval_failed", "direct", "2026-09-18T04:01:00Z")
+
+    store.save_evidence(replace(base, rationale="Timed out; Bearer abc.def " + "r" * 1200))
+    store.save_evidence(replace(base, status="retrieved", excerpt="Text", rationale="Page says the same thing."))
+    store.save_evidence(replace(base, rationale=" \n "))
+    store.save_evidence(base)
+
+    with sqlite3.connect(store.path) as connection:
+        rows = [row[0] for row in connection.execute("SELECT rationale FROM evidence ORDER BY id")]
+    assert rows[0].startswith("Timed out; Bearer [redacted] rrr")
+    assert "abc.def" not in rows[0]
+    assert len(rows[0]) == 1000
+    assert rows[1:] == ["Page says the same thing.", None, None]
+
+
+def test_retrieved_evidence_title_is_redacted_and_bounded(tmp_path: Path):
+    store, _ = revision_store(tmp_path)
+
+    store.save_evidence(Evidence(
+        None, None, "https://evidence.test/ok", "Report token=abc123 " + "t" * 600, "Excerpt", "supports", "retrieved",
+        "direct", "2026-09-18T04:00:00Z",
+    ))
+
+    with sqlite3.connect(store.path) as connection:
+        title = connection.execute("SELECT title FROM evidence").fetchone()[0]
+    assert title.startswith("Report token=[redacted] ttt")
+    assert len(title) == 500
+
+
 def test_redact_url_redacts_sensitive_fragments_and_keeps_safe_fragments():
     assert redact_url("https://evidence.test/article#access_token=secret") == "https://evidence.test/article#access_token=***"
     assert redact_url("https://evidence.test/article#section-1") == "https://evidence.test/article#section-1"
