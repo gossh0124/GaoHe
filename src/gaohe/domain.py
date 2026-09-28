@@ -8,6 +8,12 @@ CLAIM_MATERIALITIES = frozenset({"ordinary", "material"})
 CLAIM_EXTRACTION_STATUSES = frozenset({"extracted", "rejected"})
 MAX_QUERY_CHARS = 500
 MAX_SEARCH_LIMIT = 10
+# Machine-side lifecycle of one revision's analysis job.
+ANALYSIS_STATUSES = frozenset({"pending", "running", "completed", "failed", "skipped"})
+# Human review of a finding; independent from the machine-side finding status.
+REVIEW_STATUSES = frozenset({"unreviewed", "confirmed", "dismissed"})
+# What an evidence assessor may conclude about one retrieved page.
+ASSESSMENT_RELATIONS = frozenset({"supports", "contradicts", "context", "irrelevant"})
 
 
 @dataclass(frozen=True)
@@ -78,6 +84,7 @@ class RetrievedPage:
     retrieved_at: str
     status: str
     content_hash: str | None
+    fetched_via: str = "direct"
 
 
 @dataclass(frozen=True)
@@ -94,6 +101,16 @@ class Evidence:
     provider: str | None = None
     published_at: str | None = None
     content_hash: str | None = None
+    rationale: str | None = None
+
+
+@dataclass(frozen=True)
+class EvidenceAssessment:
+    """An assessor's reading of one retrieved page against one article claim."""
+
+    relation: str
+    rationale: str
+    evidence_quote: str
 
 
 @dataclass(frozen=True)
@@ -108,6 +125,7 @@ class Finding:
     status: str
     evidence_status: str
     visible: bool
+    review_status: str = "unreviewed"
 
 
 @dataclass(frozen=True)
