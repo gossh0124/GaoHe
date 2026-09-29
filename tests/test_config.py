@@ -14,6 +14,7 @@ def test_defaults_are_provider_neutral_and_do_not_create_storage(tmp_path: Path)
     assert settings.web_search_provider == "none"
     assert settings.firecrawl_api_key == ""
     assert settings.poll_interval_minutes == 60
+    assert settings.daily_llm_call_limit == 200
     assert settings.data_dir == tmp_path / "profile" / "GaoHe"
     assert settings.database_path == settings.data_dir / "gaohe.db"
     assert not settings.data_dir.exists()
@@ -41,6 +42,7 @@ def test_explicit_environment_wins_and_secrets_are_not_repr(tmp_path: Path):
             "FIRECRAWL_API_KEY": "firecrawl-secret",
             "DATA_DIR": str(tmp_path / "runtime"),
             "POLL_INTERVAL_MINUTES": "15",
+            "DAILY_LLM_CALL_LIMIT": "40",
         },
     )
 
@@ -51,6 +53,7 @@ def test_explicit_environment_wins_and_secrets_are_not_repr(tmp_path: Path):
     assert settings.firecrawl_api_key == "firecrawl-secret"
     assert settings.data_dir == tmp_path / "runtime"
     assert settings.poll_interval_minutes == 15
+    assert settings.daily_llm_call_limit == 40
     assert settings.has_llm_key
     assert settings.has_firecrawl_key
     assert settings.validate() == []
@@ -90,3 +93,25 @@ def test_explicit_empty_generic_settings_do_not_fall_back_to_legacy(tmp_path: Pa
 def test_invalid_poll_interval_raises_clear_error(tmp_path: Path, value: str):
     with pytest.raises(ValueError, match="POLL_INTERVAL_MINUTES must be a positive integer"):
         load_settings(tmp_path / ".env", {"POLL_INTERVAL_MINUTES": value})
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "unlimited", "1.5"])
+def test_invalid_daily_llm_call_limit_raises_clear_error(tmp_path: Path, value: str):
+    with pytest.raises(ValueError, match="DAILY_LLM_CALL_LIMIT must be a positive integer"):
+        load_settings(tmp_path / ".env", {"DAILY_LLM_CALL_LIMIT": value})
+
+
+def test_blank_daily_llm_call_limit_uses_the_default(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("DAILY_LLM_CALL_LIMIT=\n", encoding="utf-8")
+
+    assert load_settings(env_file, {}).daily_llm_call_limit == 200
+
+
+def test_env_example_lists_every_setting_with_working_defaults(tmp_path: Path):
+    example = Path(__file__).parents[1] / ".env.example"
+    names = {line.split("=", 1)[0] for line in example.read_text(encoding="utf-8").splitlines() if "=" in line}
+
+    assert {"POLL_INTERVAL_MINUTES", "DAILY_LLM_CALL_LIMIT", "LLM_API_KEY", "DATA_DIR"} <= names
+    settings = load_settings(example, {"LOCALAPPDATA": str(tmp_path)})
+    assert (settings.poll_interval_minutes, settings.daily_llm_call_limit) == (60, 200)
