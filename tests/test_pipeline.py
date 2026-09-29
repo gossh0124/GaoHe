@@ -16,7 +16,14 @@ from gaohe.domain import (
     Source,
     article_content_hash,
 )
-from gaohe.pipeline import BUDGET_SKIP_REASON, SUMMARY_KEYS, local_day_start, run_pending_analysis
+from gaohe.pipeline import (
+    BUDGET_SKIP_REASON,
+    OVER_BUDGET_REASON,
+    SUMMARY_KEYS,
+    empty_summary,
+    local_day_start,
+    run_pending_analysis,
+)
 from gaohe.providers import ANALYSIS_PROMPT_VERSION, NullEvidenceAssessor
 from gaohe.storage import Store
 
@@ -43,8 +50,8 @@ PAIR = (
 PAGE_TEXT = "The Keelung Harbor Bureau register lists three renewed ferry permits for this season."
 
 
-def _summary(**counts: int) -> dict[str, int]:
-    return {key: counts.get(key, 0) for key in SUMMARY_KEYS}
+def _summary(**counts: int | str) -> dict[str, int | str]:
+    return empty_summary() | counts
 
 
 def _save(store: Store, name: str, url: str, title: str, text: str, fetched_at: str = FETCHED_AT) -> int:
@@ -78,9 +85,10 @@ class FakeAnalysis:
     provider_name = "fake-llm"
     model = "fake-model-1"
 
-    def __init__(self, *, fail_urls=(), candidate=False, rejected=0, invalid_claim=False) -> None:
+    def __init__(self, *, fail_urls=(), candidate=False, rejected=0, invalid_claim=False, candidate_urls=None) -> None:
         self.fail_urls = set(fail_urls)
         self.candidate = candidate
+        self.candidate_urls = candidate_urls
         self.rejected = rejected
         self.invalid_claim = invalid_claim
         self.calls: list[int] = []
@@ -96,7 +104,7 @@ class FakeAnalysis:
         if self.invalid_claim:
             claims.append(Claim(None, revision.id, "not in the article", 0, 18, "checkable", "material", "extracted"))
         candidates = ()
-        if self.candidate:
+        if self.candidate and (self.candidate_urls is None or revision.url in self.candidate_urls):
             candidates = (FindingCandidate(
                 None, "factual_contradiction", "Check the permit count", 0, len(text), "material", "ferry permit register",
             ),)
@@ -292,7 +300,7 @@ def test_stale_running_job_is_recovered_and_fresh_one_is_left_alone(tmp_path):
 
 def test_revision_completed_concurrently_is_not_analyzed_again(tmp_path, monkeypatch):
     store = _store(tmp_path, ARTICLES[:1])
-    monkeypatch.setattr(store, "mark_analysis_running", lambda revision_id, at: False)
+    monkeypatch.setattr(store, "mark_analysis_running", lambda revision_id, at, **options: False)
     analysis = FakeAnalysis()
 
     assert run_pending_analysis(store, analysis, FakeSearch(), NoFetcher(), 10, now=NOW) == _summary()
@@ -303,10 +311,10 @@ def test_grouping_error_fails_only_that_revision(tmp_path, monkeypatch):
     store = _store(tmp_path)
     real_group = pipeline.group_revision
 
-    def group(revision, existing):
+    def group(revision, existing, **options):
         if revision.id == 2:
             raise RuntimeError("bad text")
-        return real_group(revision, existing)
+        return real_group(revision, existing, **options)
 
     monkeypatch.setattr(pipeline, "group_revision", group)
 
@@ -321,9 +329,9 @@ def test_grouping_is_peer_major_and_pairs_each_revision_with_each_peer_once(tmp_
     real_group = pipeline.group_revision
     calls = []
 
-    def group(revision, existing):
+    def group(revision, existing, **options):
         calls.append((existing[0].id, revision.id))
-        return real_group(revision, existing)
+        return real_group(revision, existing, **options)
 
     monkeypatch.setattr(pipeline, "group_revision", group)
 
@@ -380,16 +388,17 @@ def test_budget_counts_calls_made_during_the_run(tmp_path):
 
 def test_budget_reached_before_an_assessment_skips_the_revision_without_an_attempt(tmp_path):
     store = _store(tmp_path, ARTICLES[:2])
+    _record_calls(store, LOCAL_MIDNIGHT_UTC, 1)  # something else already used part of today's budget
     assessor = ContradictsAssessor()
     search = FakeSearch(("https://register.test/one", "https://register.test/two"))
 
     summary = run_pending_analysis(
-        store, FakeAnalysis(candidate=True), search, PageFetcher(), 10, assessor=assessor, now=NOW, daily_llm_call_limit=2,
+        store, FakeAnalysis(candidate=True), search, PageFetcher(), 10, assessor=assessor, now=NOW, daily_llm_call_limit=3,
     )
 
     assert summary == _summary(skipped=2)
     assert len(assessor.calls) == 1
-    assert [row[3:6] for row in _ledger(store)] == [("analysis", 1, "ok"), ("assessment", 1, "ok")]
+    assert [row[3:6] for row in _ledger(store)] == [("analysis", None, "ok"), ("analysis", 1, "ok"), ("assessment", 1, "ok")]
     status = store.analysis_status(1)
     assert (status["status"], status["attempts"], status["last_error"]) == ("skipped", 0, BUDGET_SKIP_REASON)
     assert store.list_findings(visible_only=False) == []
@@ -399,6 +408,27 @@ def test_budget_reached_before_an_assessment_skips_the_revision_without_an_attem
         store, FakeAnalysis(candidate=True), search, PageFetcher(), 10, assessor=assessor, now=tomorrow, daily_llm_call_limit=10,
     )
     assert summary == _summary(claims=2, candidates=2, visible_findings=2, analyzed=2)
+
+
+def test_revision_needing_more_calls_than_the_daily_limit_fails_instead_of_blocking_the_queue(tmp_path):
+    # Finding 3: it needs 1 analysis + 2 assessments but the limit is 2; retrying it daily would starve the rest.
+    store = _store(tmp_path, ARTICLES[:2])
+    search = FakeSearch(("https://register.test/one", "https://register.test/two"))
+
+    analysis = FakeAnalysis(candidate=True, candidate_urls={ARTICLES[0][1]})
+
+    def run(moment):
+        return run_pending_analysis(
+            store, analysis, search, PageFetcher(), 10, assessor=ContradictsAssessor(), now=moment, daily_llm_call_limit=2,
+        )
+
+    assert run(NOW) == _summary(failed=1, skipped=1)
+    status = store.analysis_status(1)
+    assert (status["status"], status["attempts"], status["last_error"]) == ("failed", 3, OVER_BUDGET_REASON)
+
+    # The next day the unrelated article is analyzed and the oversized one is not retried.
+    assert run(NOW + timedelta(days=1)) == _summary(claims=1, analyzed=1)
+    assert analysis.calls == [1, 2]
 
 
 # --- LLM ledger ---------------------------------------------------------------------------------------------

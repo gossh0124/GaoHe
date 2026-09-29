@@ -16,23 +16,27 @@ so long articles stay cheap.
 
 from array import array
 from bisect import bisect_left
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 from functools import cached_property, lru_cache
+import ipaddress
 import re
 import unicodedata
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .domain import MAX_QUERY_CHARS, ArticleRevision, FindingCandidate, TopicGroup
-from .safety import is_credential_free_http_url
+from .safety import canonical_url, is_credential_free_http_url, redact_url
 
 
 TOPIC_WINDOW_HOURS = 72
 MAX_SUMMARY_CHARS = 500
 MAX_LABEL_CHARS = 120
+# Two exact figures for the same thing differ materially when one is at least this multiple of the
+# other (spec 7.4: 450 / 500 / 520 are one event's scale; 100 / 900 or 300 / 3000 are not).
+MATERIAL_RATIO = 2
 
 # Share of the smaller article's event vocabulary that two articles must have in
 # common. Short texts are governed by the anchor counts; this keeps long Chinese
@@ -45,7 +49,7 @@ _CONTEXT_RADIUS = 200
 _MAX_NUMERIC_CLAIMS = 64
 _MAX_OPPOSITE_HITS = 16
 _MAX_CONTEXT_CHECKS = 2_048
-_MAX_ENTITY_PREFIX = 5
+_MAX_ENTITY_PREFIX = 6
 # Only this much of a name's prefix masks bigram chains, so a verb the name swallowed still counts.
 _CORE_PREFIX = 3
 _DOC_CACHE_SIZE = 64
@@ -88,7 +92,14 @@ _STOP_BIGRAMS = frozenset(
 # Grammatical particles and pronouns: a bigram containing one is dropped.
 _PARTICLES = frozenset("的了著是在之與及並其這那也都就而但或又很已於為將從該嗎呢吧啊呀們他她我你它一有")
 # Characters an entity name never extends leftward across.
-_ENTITY_BREAKERS = (_PARTICLES - {"一"}) | frozenset("和被對向到給讓跟")
+_ENTITY_BREAKERS = (_PARTICLES - {"一"}) | frozenset("和被對向到給讓跟送")
+# Verbs that commonly precede a name; the name starts after them (感謝立法院 -> 立法院).
+_ENTITY_BREAKING_BIGRAMS = frozenset(
+    """
+    成立 感謝 前往 抵達 出席 主持 拜會 會見 呼籲 要求 批評 送交 函送 移送 送往 送請 提交 交由 經由 透過
+    根據 依據 協助 聯合 率領 帶領 召集 邀請 宣布 通知 函請 請求 致電 發言
+    """.split()
+)
 
 _ENTITY_SUFFIXES = (
     "股份有限公司", "有限公司", "委員會", "基金會", "研究院", "研究所", "事務所", "辦公室",
@@ -107,6 +118,7 @@ _SUFFIX_BLOCKING_NEXT = {
     "局": "面勢部",
     "市": "場值況",
     "省": "錢電時力油水",
+    "會": "後議中上前見面談商晤",
 }
 # Common words that merely end in a suffix character.
 _NON_ENTITIES = frozenset(
@@ -155,9 +167,12 @@ _NUMBER = re.compile(
 _CHUNK = re.compile(rf"({_VALUE})([百千萬億兆]*)")
 _APPROX_BEFORE = re.compile(
     r"(?:\b(?:about|around|approximately|roughly|nearly|almost|over|under|some|estimated"
-    r"|more than|less than|fewer than|at least|at most|up to)"
-    r"|約莫|大約|約略|將近|接近|近乎|大概|超過|至少|不到|不足|未滿|上看|約|近|逾)(?:有|達|為)?[ \t]*$"
+    r"|more than|less than|fewer than|at least|at most|up to|close to|as many as|upwards of)"
+    r"|約莫|大約|約略|將近|接近|近乎|大概|超過|至少|不到|不足|未滿|上看|約|近|逾"
+    r"|突破|高達|多達|最多|至多|最少|預估|估計|粗估|未達|低於|高於|不下|上限|下限|破)(?:有|達|為)?[ \t]*$"
 )
+# 前10名 is a rank, not a count; 目前 / 日前 ... also end in 前 but only say when.
+_ORDINAL_BEFORE_TIME = ("目前", "日前", "先前", "之前", "此前", "當前", "眼前", "年前", "月前", "天前")
 _APPROX_AFTER = re.compile(r"[ \t]*(?:左右|上下|以上|以下|之譜|出頭|開外|不等|or so\b|or more\b|or fewer\b|or less\b|\+)")
 # Both ends of a range or list are approximate: 500至600人, 500人至600人, 5、6人, between 500 and 600.
 _RANGE_BEFORE = re.compile(
@@ -179,8 +194,12 @@ _CJK_NEGATION = re.compile(
     r"|考慮|研議|研擬|研究|評估|規劃|討論|爭取|推動|可能|要求|呼籲|反對|重新|再度|暫緩|延後|延緩|停止|取消"
     r"|計畫|計劃|預計|預定|打算|希望|準備|有望|即將|擬|將|恐|盼|若|應)\s*$"
 )
-# A following character that turns the verb into a noun or adjective (開放式, 同意書 ...).
-_CJK_OPPOSITE_BLOCKING_NEXT = frozenset("率性式者黨書權派票案")
+# A negator a few characters before the verb still negates it (未獲通過, 並未獲得通過, 沒有在本會期通過, 恐難通過).
+_CJK_NEGATION_WINDOW = re.compile(r"(?:未|沒|無望|無法|難)[^，。、；：！？,.;:!?\s]{0,6}$")
+# 通過與否仍待觀察: the outcome is still open.
+_CJK_HEDGE_AFTER = re.compile(r"\s*與否")
+# A following character that turns the verb into a noun, adjective or idiom (開放式, 同意書, 開放資料, 釋放訊號 ...).
+_CJK_OPPOSITE_BLOCKING_NEXT = frozenset("率性式者黨書權派票案資態空政原令訊善利檢")
 
 
 @lru_cache(maxsize=8192)
@@ -226,11 +245,20 @@ def _kept_bigram(bigram: str) -> bool:
 def _breaks_entity(norm: str, position: int, run_start: int) -> bool:
     if norm[position] in _ENTITY_BREAKERS:
         return True
-    return position > run_start and norm[position - 1:position + 1] in _STOP_BIGRAMS
+    if position <= run_start:
+        return False
+    bigram = norm[position - 1:position + 1]
+    return bigram in _STOP_BIGRAMS or bigram in _ENTITY_BREAKING_BIGRAMS
 
 
-def _cjk_entities(norm: str, run_start: int, run_end: int, core: bytearray, found: list[tuple[int, int, str]]) -> None:
-    """Collect suffix-anchored names in one CJK run, e.g. 政院 and 行政院 for 今天行政院."""
+def _cjk_entities(
+    norm: str, run_start: int, run_end: int, core: bytearray, found: list[tuple[int, int, str]], whole: set[str]
+) -> None:
+    """Collect suffix-anchored names in one CJK run, e.g. 政院 and 行政院 for 今天行政院.
+
+    A name whose left edge is the run start or follows a breaker is recorded in `whole`:
+    that occurrence is a complete name rather than the tail of a longer word.
+    """
     for last in range(run_start + 1, run_end):
         candidates = _SUFFIXES_BY_LAST.get(norm[last])
         if not candidates:
@@ -249,6 +277,8 @@ def _cjk_entities(norm: str, run_start: int, run_end: int, core: bytearray, foun
             if _breaks_entity(norm, position, run_start):
                 break
             found.append((position, stop, norm[position:stop]))
+            if position == run_start or _breaks_entity(norm, position - 1, run_start):
+                whole.add(norm[position:stop])
             begin = position
         if begin is not None:
             begin = max(begin, first - _CORE_PREFIX + 1)
@@ -319,12 +349,14 @@ class _Doc:
         self.core = bytearray(len(norm) + 1)
         self.bigram_positions = array("i")
         cjk: list[tuple[int, int, str]] = []
+        whole: set[str] = set()
         for run in _CJK_RUN.finditer(norm):
             self.bigram_positions.extend(
                 position for position in range(run.start(), run.end() - 1) if _kept_bigram(norm[position:position + 2])
             )
-            _cjk_entities(norm, run.start(), run.end(), self.core, cjk)
+            _cjk_entities(norm, run.start(), run.end(), self.core, cjk, whole)
         self.cjk = sorted(cjk)
+        self.whole_names = frozenset(whole)
         self.word_starts = [item[0] for item in self.words]
         self.number_starts = [item[0] for item in self.numbers]
         self.english_starts = [item[0] for item in self.english]
@@ -333,6 +365,7 @@ class _Doc:
         self._regions: dict[tuple[int, int], _Region] = {}
         self._claims: list[_NumericClaim] | None = None
         self._hits: dict[str, list[tuple[int, int]]] = {}
+        self._names: dict[str, frozenset[str]] | None = None
 
     @property
     def whole(self) -> _Region:
@@ -369,10 +402,57 @@ class _Doc:
             self._hits[word] = _opposite_hits(self.norm, word)
         return self._hits[word]
 
+    def specific_names(self) -> dict[str, frozenset[str]]:
+        if self._names is None:
+            self._names = _specific_names(self.norm)
+        return self._names
+
 
 @lru_cache(maxsize=_DOC_CACHE_SIZE)
 def _doc(text: str) -> _Doc:
     return _Doc(text)
+
+
+# Names that tell two events of the same kind apart: 萬華區 vs 內湖區, 山陀兒颱風 vs 康芮颱風, 國道1號 vs 國道3號.
+# Names are compared by the two characters before the suffix, so 台北市萬華區 and 萬華區 agree.
+_DISTRICT = re.compile(f"([{_CJK}]{{2}})([區鄉鎮])")
+_GENERIC_PLACE_ENDINGS = {
+    "區": frozenset("災地社園山市郊景校選轄管禁戰專特學商工營分本全各該此街城新舊港疫熱震林礦住轉展灣業政護發範務車"),
+    "鄉": frozenset("家故城下返同異他思原本全各該此"),
+    "鎮": frozenset("城市坐重鄉本全各該此"),
+}
+_TYPHOON = re.compile(f"([{_CJK}]{{2}})颱風")
+_NOT_IN_TYPHOON_NAME = frozenset("受遭逢因防應對針由於關注意留颱個號度烈上今這此本首一級帶季到布發")
+_ROAD = re.compile(r"(國道|台)[ \t]*([0-9一二三四五六七八九十]{1,3})[ \t]*(號|線)")
+
+
+def _plain_stem(stem: str) -> bool:
+    return stem not in _STOP_BIGRAMS and not any(character in _ENTITY_BREAKERS for character in stem)
+
+
+def _specific_names(norm: str) -> dict[str, frozenset[str]]:
+    districts = {
+        match.group(1) for match in _DISTRICT.finditer(norm)
+        if match.group(1)[-1] not in _GENERIC_PLACE_ENDINGS[match.group(2)] and _plain_stem(match.group(1))
+    }
+    typhoons = {
+        match.group(1) for match in _TYPHOON.finditer(norm)
+        if _plain_stem(match.group(1)) and not set(match.group(1)) & _NOT_IN_TYPHOON_NAME
+    }
+    roads = {"".join(match.groups()) for match in _ROAD.finditer(norm)}
+    return {"district": frozenset(districts), "typhoon": frozenset(typhoons), "road": frozenset(roads)}
+
+
+def _names_conflict(left: ArticleRevision, right: ArticleRevision) -> bool:
+    """Both articles name a district, typhoon or road, and none of that kind in common: two different events."""
+    left_names = [_doc(left.title).specific_names(), _doc(left.text).specific_names()]
+    right_names = [_doc(right.title).specific_names(), _doc(right.text).specific_names()]
+    for kind in left_names[0]:
+        left_kind = left_names[0][kind] | left_names[1][kind]
+        right_kind = right_names[0][kind] | right_names[1][kind]
+        if left_kind and right_kind and not left_kind & right_kind:
+            return True
+    return False
 
 
 def _overlaps(start: int, end: int, spans: Iterable[tuple[int, int]]) -> bool:
@@ -461,34 +541,68 @@ def _views(revision: ArticleRevision) -> tuple[tuple[_Region, _Region], tuple[_R
 
 def _host(url: str) -> str:
     try:
-        return (urlsplit(url).hostname or "").casefold()
+        return (urlsplit(url).hostname or "").casefold().rstrip(".")
     except ValueError:
         return ""
 
 
-def _safe_url(url: str) -> str:
+# Second-level labels under a country code that are registries, not outlets (com.tw, co.uk, org.hk ...).
+_REGISTRY_LABELS = frozenset({"com", "net", "org", "gov", "edu", "idv", "mil", "co", "ac", "or", "ne", "go", "gr", "ltd", "info", "biz"})
+
+
+def _outlet(url: str) -> str:
+    """The registrable domain, so news.ltn.com.tw and ec.ltn.com.tw count as one outlet."""
+    host = _host(url)
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    labels = host.split(".")
+    keep = 3 if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in _REGISTRY_LABELS else 2
+    return ".".join(labels[-keep:])
+
+
+def _identity(url: str) -> str:
+    """What makes two article URLs the same article; keeps the query, where some outlets put the article id."""
+    return (canonical_url(url) or "")[:500]
+
+
+def _display_url(url: str) -> str:
+    """A URL fit for a summary: no credentials, no secret-bearing parameters or fragment, article ids kept."""
     if not is_credential_free_http_url(url):
         return ""
-    parsed = urlsplit(url)
-    return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path, "", ""))[:200]
+    parsed = urlsplit(redact_url(url))
+    query = urlencode([
+        (name, value) for name, value in parse_qsl(parsed.query, keep_blank_values=True) if value != "***"
+    ])
+    return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path, query, ""))[:200]
 
 
-def _when(value: str) -> datetime | None:
+def _when(value: str | None) -> datetime | None:
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))  # type: ignore[union-attr]
+    except (AttributeError, TypeError, ValueError):
         return None
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
 
-def _within_window(left: ArticleRevision, right: ArticleRevision) -> bool:
-    left_when, right_when = _when(left.fetched_at), _when(right.fetched_at)
+def _event_time(revision: ArticleRevision, event_times: Mapping[int, str] | None) -> datetime | None:
+    """The article's publication time when known, else when this revision was fetched."""
+    published = _when(event_times.get(revision.id)) if event_times else None
+    return published or _when(revision.fetched_at)
+
+
+def _within_window(left: ArticleRevision, right: ArticleRevision, event_times: Mapping[int, str] | None = None) -> bool:
+    left_when, right_when = _event_time(left, event_times), _event_time(right, event_times)
     return left_when is not None and right_when is not None and abs((left_when - right_when).total_seconds()) <= TOPIC_WINDOW_HOURS * 3600
 
 
-def _pair_confidence(left: ArticleRevision, right: ArticleRevision) -> str | None:
-    left_url, right_url = _safe_url(left.url), _safe_url(right.url)
-    if not left_url or not right_url or left_url == right_url or not _within_window(left, right):
+def _pair_confidence(
+    left: ArticleRevision, right: ArticleRevision, event_times: Mapping[int, str] | None = None
+) -> str | None:
+    left_url, right_url = _identity(left.url), _identity(right.url)
+    if not left_url or not right_url or left_url == right_url or not _within_window(left, right, event_times):
         return None
     left_all, left_body = _views(left)
     right_all, right_body = _views(right)
@@ -496,16 +610,37 @@ def _pair_confidence(left: ArticleRevision, right: ArticleRevision) -> str | Non
     if not shared_events:
         return None
     if (
-        _host(left_url) != _host(right_url)
+        _outlet(left_url) != _outlet(right_url)
         and _entities(left_all) & _entities(right_all)
         and shared_events >= 2
         and _anchor_count(left_body, right_body) >= 2
         and _overlap(left_body, right_body) >= _HIGH_OVERLAP
+        and not _names_conflict(left, right)
     ):
         return "high"
     if _overlap(left_all, right_all) >= _POSSIBLE_OVERLAP:
         return "possible"
     return None
+
+
+def _titles_share_event(left: ArticleRevision, right: ArticleRevision) -> bool:
+    """Whether the titles share a word or phrase beyond names: a precondition for comparing figures."""
+    left_title, right_title = _doc(left.title).whole, _doc(right.title).whole
+    if _latin_events((left_title,)) & _latin_events((right_title,)):
+        return True
+    shared = set(left_title.bigram_set & right_title.bigram_set)
+    return bool(shared) and min(
+        _segments(left_title.bigrams, shared, left_title.core), _segments(right_title.bigrams, shared, right_title.core)
+    ) > 0
+
+
+def _trimmed_chain(norm: str, begin: int, end: int) -> str:
+    """Drop an edge character that belongs to a neighbouring stop word (即時新聞 shares 即時新 -> 即時)."""
+    while end - begin > 2 and norm[end - 1:end + 1] in _STOP_BIGRAMS:
+        end -= 1
+    while end - begin > 2 and begin > 0 and norm[begin - 1:begin + 1] in _STOP_BIGRAMS:
+        begin += 1
+    return norm[begin:end]
 
 
 def _chain_texts(region: _Region, shared: frozenset[str], norm: str) -> set[str]:
@@ -519,42 +654,57 @@ def _chain_texts(region: _Region, shared: frozenset[str], norm: str) -> set[str]
             previous = position
             continue
         if begin is not None and previous is not None:
-            texts.add(norm[begin:previous + 2])
+            texts.add(_trimmed_chain(norm, begin, previous + 2))
         begin = previous = position
     if begin is not None and previous is not None:
-        texts.add(norm[begin:previous + 2])
+        texts.add(_trimmed_chain(norm, begin, previous + 2))
     return texts
 
 
 def _label(left: ArticleRevision, right: ArticleRevision) -> str:
     left_doc, right_doc = _doc(left.title), _doc(right.title)
     left_title, right_title = left_doc.whole, right_doc.whole
-    items = ({value for *_, value in left_title.words} | left_title.numbers) & (
-        {value for *_, value in right_title.words} | right_title.numbers
-    )
+    # Bare numbers make poor labels ("2 6" for 6.2), so only words, phrases and names are used.
+    items = {value for *_, value in left_title.words} & {value for *_, value in right_title.words}
     items |= _chain_texts(left_title, left_title.bigram_set & right_title.bigram_set, left_doc.norm)
     left_all, _ = _views(left)
     right_all, _ = _views(right)
-    items |= frozenset().union(*(region.english_entities | region.cjk_entities for region in left_all)) & frozenset().union(
+    names = frozenset().union(*(region.english_entities | region.cjk_entities for region in left_all)) & frozenset().union(
         *(region.english_entities | region.cjk_entities for region in right_all)
     )
-    # Prefer 行政院 over its fragment 政院, and a whole shared phrase over its pieces.
+    items |= names
+    # Names that occur as a complete name (not the tail of a longer word) in both articles.
+    whole = (left_doc.whole_names | _doc(left.text).whole_names) & (right_doc.whole_names | _doc(right.text).whole_names)
     cjk_items = {item for item in items if _CJK_RUN.search(item)}
-    chosen: list[str] = []
-    for item in sorted(items):
-        if item in cjk_items and any(item != other and item in other for other in cjk_items):
-            continue
-        chosen.append(item)
-        if len(chosen) == 5:
-            break
+
+    def dominated(item: str) -> bool:
+        # Prefer 行政院 over its fragment 政院 and a whole shared phrase over its pieces, but keep the
+        # complete name 立法院 rather than a verb-glued 感謝立法院.
+        for other in cjk_items - {item}:
+            if item in other and not (item in whole and other in names and other not in whole):
+                return True
+            if item in names and other in names and other in item and other in whole and item not in whole:
+                return True
+        return False
+
+    chosen = [item for item in sorted(items) if item not in cjk_items or not dominated(item)][:5]
     return " ".join(chosen)[:MAX_LABEL_CHARS] or "possible topic"
 
 
-def group_revision(revision: ArticleRevision, existing: Sequence[ArticleRevision]) -> TopicGroup | None:
-    """Return the best deterministic grouping signal without forcing uncertain peers."""
+def group_revision(
+    revision: ArticleRevision,
+    existing: Sequence[ArticleRevision],
+    *,
+    event_times: Mapping[int, str] | None = None,
+) -> TopicGroup | None:
+    """Return the best deterministic grouping signal without forcing uncertain peers.
+
+    event_times maps revision ids to their article's publication time; revisions without
+    one fall back to their fetch time for the TOPIC_WINDOW_HOURS window.
+    """
     possible: ArticleRevision | None = None
     for item in existing:
-        confidence = _pair_confidence(revision, item)
+        confidence = _pair_confidence(revision, item, event_times)
         if confidence == "high":
             return TopicGroup(None, _label(revision, item), "high", "active")
         if confidence == "possible" and possible is None:
@@ -591,6 +741,8 @@ def _numeric_claims(norm: str) -> list[_NumericClaim]:
         before = norm[max(0, match.start() - 16):match.start()]
         if before.endswith("第") or _APPROX_BEFORE.search(before) or _RANGE_BEFORE.search(before):
             continue
+        if unit == "名" and before.endswith("前") and not before.endswith(_ORDINAL_BEFORE_TIME):
+            continue
         value_end = match.end("scale") if match.group("scale") else match.end("value")
         if (
             _APPROX_AFTER.match(norm, match.end())
@@ -626,7 +778,12 @@ def _opposite_hits(norm: str, word: str) -> list[tuple[int, int]]:
         if latin:
             negated = _LATIN_NEGATION.search(before) is not None
         else:
-            negated = _CJK_NEGATION.search(before) is not None or norm[end:end + 1] in _CJK_OPPOSITE_BLOCKING_NEXT
+            negated = (
+                _CJK_NEGATION.search(before) is not None
+                or _CJK_NEGATION_WINDOW.search(before) is not None
+                or norm[end:end + 1] in _CJK_OPPOSITE_BLOCKING_NEXT
+                or _CJK_HEDGE_AFTER.match(norm, end) is not None
+            )
         if negated:
             continue
         hits.append((start, end))
@@ -660,18 +817,41 @@ def _phrase(doc: _Doc, start: int, end: int) -> tuple[int, int, str]:
     return original_start, original_end, " ".join(doc.text[original_start:original_end].split())
 
 
+def _neighbour_keys(doc: _Doc, start: int, end: int) -> frozenset[str]:
+    """The kept word right before and right after a span: 首批旅行團共5000人抵達 -> {團共, 抵達}.
+
+    For Chinese these are CJK bigrams; for Latin text the nearest non-stopword on each side.
+    """
+    norm = doc.norm
+    keys = set()
+    for bigram in (norm[max(0, start - 2):start], norm[end:end + 2]):
+        if len(bigram) == 2 and _CJK_RUN.fullmatch(bigram) and _kept_bigram(bigram):
+            keys.add(bigram)
+    index = bisect_left(doc.word_starts, start)
+    before = [value for _, word_end, value in doc.words[max(0, index - 3):index] if word_end <= start and value not in _STOPWORDS]
+    after = [value for word_start, _, value in doc.words[index:index + 4] if word_start >= end and value not in _STOPWORDS]
+    keys.update(before[-1:] + after[:1])
+    return frozenset(keys)
+
+
 def _numeric_difference(left: _Doc, right: _Doc, budget: _Budget) -> tuple[int, int, str, str] | None:
     peers_by_unit: dict[str, list[_NumericClaim]] = {}
     for claim in right.numeric_claims():
         peers_by_unit.setdefault(claim.unit, []).append(claim)
     for claim in left.numeric_claims():
         peers = peers_by_unit.get(claim.unit)
-        if not peers:
+        if not peers or any(other.value == claim.value for other in peers):
+            # The peer also states this figure (identical wire copies do): a differing one counts something else.
             continue
         left_context = left.context(claim.start, claim.end)
         skip_values = frozenset({claim.unit}) if claim.latin_unit else frozenset()
+        # A measure word such as 人 does not say what is counted; the words around the figure must agree.
+        counted = None if claim.latin_unit else _neighbour_keys(left, claim.start, claim.end)
         for other in peers:
-            if other.value == claim.value or other.value.adjusted() == claim.value.adjusted():
+            low, high = sorted((claim.value, other.value))
+            if high < low * MATERIAL_RATIO:
+                continue
+            if counted is not None and not counted & _neighbour_keys(right, other.start, other.end):
                 continue
             if not budget.take():
                 return None
@@ -691,6 +871,27 @@ def _numeric_difference(left: _Doc, right: _Doc, budget: _Budget) -> tuple[int, 
     return None
 
 
+def _same_event_context(
+    left: _Doc, left_span: tuple[int, int], right: _Doc, right_span: tuple[int, int], required: int
+) -> bool:
+    """Whether the sentences around two opposite words share a name and `required` other anchors."""
+    left_context, right_context = left.context(*left_span), right.context(*right_span)
+    if not left_context.entities & right_context.entities:
+        return False
+    anchors = _anchor_count(
+        (left_context,), (right_context,), skip_values=_OPPOSITE_WORDS, left_skip=(left_span,), right_skip=(right_span,),
+    )
+    return anchors >= required
+
+
+def _also_asserted(doc: _Doc, word: str, other: _Doc, other_span: tuple[int, int], required: int, budget: _Budget) -> bool:
+    """Whether doc itself also asserts word about the event around other_span (so the outlets agree somewhere)."""
+    for span in doc.opposite_hits(word):
+        if not budget.take() or _same_event_context(doc, span, other, other_span, required):
+            return True  # out of budget counts as "cannot rule it out"
+    return False
+
+
 def _opposite_difference(left: _Doc, right: _Doc, budget: _Budget) -> tuple[int, int, str, str] | None:
     for first, second in _OPPOSITES:
         for left_word, right_word in ((first, second), (second, first)):
@@ -703,28 +904,31 @@ def _opposite_difference(left: _Doc, right: _Doc, budget: _Budget) -> tuple[int,
                 left_context = left.context(left_start, left_end)
                 if _mentions(left, left_context, right_word):
                     continue
+                # Both verbs must have the same subject or object: 長照床位增加 vs 長照人力減少 is no conflict.
+                arguments = _neighbour_keys(left, left_start, left_end)
                 for right_start, right_end in right_hits:
+                    if not arguments & _neighbour_keys(right, right_start, right_end):
+                        continue
                     if not budget.take():
                         return None
                     right_context = right.context(right_start, right_end)
-                    if _mentions(right, right_context, left_word) or not left_context.entities & right_context.entities:
+                    if _mentions(right, right_context, left_word):
                         continue
-                    anchors = _anchor_count(
-                        (left_context,),
-                        (right_context,),
-                        skip_values=_OPPOSITE_WORDS,
-                        left_skip=((left_start, left_end),),
-                        right_skip=((right_start, right_end),),
-                    )
-                    if anchors >= required:
-                        start, end, phrase = _phrase(left, left_start, left_end)
-                        return start, end, phrase, _phrase(right, right_start, right_end)[2]
+                    left_span, right_span = (left_start, left_end), (right_start, right_end)
+                    if not _same_event_context(left, left_span, right, right_span, required):
+                        continue
+                    if _also_asserted(right, left_word, left, left_span, required, budget) or _also_asserted(
+                        left, right_word, right, right_span, required, budget
+                    ):
+                        continue
+                    start, end, phrase = _phrase(left, left_start, left_end)
+                    return start, end, phrase, _phrase(right, right_start, right_end)[2]
     return None
 
 
 def _candidate(left: ArticleRevision, right: ArticleRevision, difference: tuple[int, int, str, str]) -> FindingCandidate:
     start, end, left_claim, right_claim = difference
-    left_url, right_url = _safe_url(left.url), _safe_url(right.url)
+    left_url, right_url = _display_url(left.url), _display_url(right.url)
     detail = f"{left_claim} versus {right_claim}"
     sources = f"{left_url} ({_host(left.url)}, {left.fetched_at[:32]}) vs {right_url} ({_host(right.url)}, {right.fetched_at[:32]})"
     summary = f"Material cross-media difference: {detail}; sources: {sources}"[:MAX_SUMMARY_CHARS]
@@ -732,13 +936,19 @@ def _candidate(left: ArticleRevision, right: ArticleRevision, difference: tuple[
     return FindingCandidate(None, "material_cross_media_difference", summary, start, end, "material", query, left.id)
 
 
-def compare_topic(revisions: Sequence[ArticleRevision]) -> list[FindingCandidate]:
-    """Return only material, checkable candidates between high-confidence peers."""
+def compare_topic(
+    revisions: Sequence[ArticleRevision], *, event_times: Mapping[int, str] | None = None
+) -> list[FindingCandidate]:
+    """Return only material, checkable candidates between high-confidence peers.
+
+    A pair is compared only when its titles share a word or phrase beyond names, so two
+    events that merely involve the same institution never yield a difference.
+    """
     candidates: list[FindingCandidate] = []
     seen: set[tuple[int, int, int]] = set()
     for index, left in enumerate(revisions):
         for right in revisions[index + 1:]:
-            if _pair_confidence(left, right) != "high":
+            if _pair_confidence(left, right, event_times) != "high" or not _titles_share_event(left, right):
                 continue
             left_doc, right_doc = _doc(left.text), _doc(right.text)
             budget = _Budget(_MAX_CONTEXT_CHECKS)

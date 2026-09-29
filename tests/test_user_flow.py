@@ -88,7 +88,7 @@ def test_offline_windows_user_flow_keeps_key_local_and_skips_unchanged_content(t
     summary = run_pending_analysis(store, FakeAnalysis(), NoSearch(), NoFetcher(), 10, now=NOW)
     assert summary == {
         "claims": 1, "candidates": 0, "visible_findings": 0, "pending": 0, "retrieval_failures": 0,
-        "rejected_claims": 0, "analyzed": 1, "failed": 0, "skipped": 0,
+        "rejected_claims": 0, "analyzed": 1, "failed": 0, "skipped": 0, "stopped": 0, "stop_code": "",
     }
     revision = store.list_recent_revisions()[0]
     page = render_status_page({

@@ -43,6 +43,9 @@ MAX_REVIEW_NOTE_CHARS = 500
 MAX_HTTP_VALIDATOR_CHARS = 200
 MAX_EVIDENCE_TITLE_CHARS = 500
 MAX_TOPIC_LABEL_CHARS = 500
+# A running job untouched for this long belongs to a run that crashed or was closed.
+STALE_AFTER_MINUTES = 60
+ABANDONED_RUN_ERROR = "上一次分析沒有完成（程式可能被關閉或電腦進入睡眠），已計為一次失敗。"
 
 _PROVIDER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _EVIDENCE_RELATIONS = {"supports", "contradicts", "context"}
@@ -53,6 +56,7 @@ _FINDING_STATUSES = {"pending", "resolved", "dismissed"}
 _TOPIC_CONFIDENCES = {"high", "possible", "low"}
 _TOPIC_STATUSES = {"active", "possible", "dismissed"}
 _SQL_CHUNK = 500
+_MAX_DETAIL_FINDINGS = 500
 _REVISION_COLUMNS = """revisions.id, revisions.article_id, articles.url, revisions.title,
                        revisions.text, revisions.content_hash, revisions.fetched_at"""
 _ANALYSIS_STATUS_KEYS = ("status", "attempts", "last_error", "updated_at", "provider", "model", "prompt_version")
@@ -97,6 +101,19 @@ def _moment(value: str | datetime | None) -> datetime:
             raise ValueError("timestamps must be UTC ISO-8601 strings")
         return value.astimezone(timezone.utc)
     return datetime.fromisoformat(_utc_iso(value).replace("Z", "+00:00"))
+
+
+def _require_positive(name: str, value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"{name} must be positive")
+
+
+def _is_stale(updated_at: str | None, cutoff: datetime) -> bool:
+    """Whether a running job was last touched before cutoff; an unreadable time counts as stale."""
+    try:
+        return _moment(updated_at) < cutoff if updated_at else True
+    except ValueError:
+        return True
 
 
 def _sortable(value: str) -> str:
@@ -428,6 +445,31 @@ def _migration_5_app_state_and_source_kind(connection: sqlite3.Connection) -> No
     )
 
 
+# Evidence that could carry a finding under the visibility policy of schema 6: retrieved, with a page
+# excerpt and an assessor's rationale, of the kind the finding type needs. Kept as SQL so this migration
+# stays fixed even when gaohe.policy changes later.
+_ASSESSED_CARRYING_EVIDENCE = """
+    SELECT 1 FROM evidence
+    WHERE evidence.finding_id = findings.id
+      AND evidence.status = 'retrieved'
+      AND trim(evidence.excerpt) != ''
+      AND evidence.rationale IS NOT NULL AND trim(evidence.rationale) != ''
+      AND ((findings.finding_type = 'factual_contradiction'
+            AND evidence.relation = 'contradicts' AND evidence.source_kind IN ('direct', 'firecrawl'))
+        OR (findings.finding_type = 'unsupported_inference'
+            AND evidence.relation IN ('context', 'contradicts') AND evidence.source_kind IN ('direct', 'firecrawl'))
+        OR (findings.finding_type = 'material_cross_media_difference'
+            AND evidence.relation = 'contradicts' AND evidence.source_kind = 'related_article'))"""
+
+
+def _migration_6_hide_unassessed_findings(connection: sqlite3.Connection) -> None:
+    """v0.1 stored topic differences as visible without any assessment; only assessed evidence may show a finding."""
+    connection.execute(
+        f"""UPDATE findings SET visible = 0, status = 'pending'
+            WHERE visible = 1 AND NOT EXISTS ({_ASSESSED_CARRYING_EVIDENCE})"""
+    )
+
+
 # Append-only: never edit or reorder a released step; add a new one instead.
 _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_1_baseline,
@@ -435,6 +477,7 @@ _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_3_review_fetch_state_and_ledger,
     _migration_4_indexes,
     _migration_5_app_state_and_source_kind,
+    _migration_6_hide_unassessed_findings,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 MANUAL_SOURCE_NAME = "單篇查核"
@@ -561,8 +604,12 @@ class Store:
 
     def monitoring_paused(self) -> bool:
         with self._connection(write=False) as connection:
-            row = connection.execute("SELECT value FROM app_state WHERE key = 'monitoring_paused'").fetchone()
-            return row is not None and row[0] == "1"
+            return self._monitoring_paused(connection)
+
+    @staticmethod
+    def _monitoring_paused(connection: sqlite3.Connection) -> bool:
+        row = connection.execute("SELECT value FROM app_state WHERE key = 'monitoring_paused'").fetchone()
+        return row is not None and row[0] == "1"
 
     def set_monitoring_paused(self, paused: bool, at: str) -> None:
         with self._connection() as connection:
@@ -613,6 +660,7 @@ class Store:
                 ).fetchone()[0]
                 if current_hash == article.content_hash:
                     return current_revision_id, False
+                self._hide_differences_against(connection, candidate.url, current_hash)
             cursor = connection.execute(
                 """INSERT INTO article_revisions (article_id, title, text, fetched_at, content_hash, fetch_status)
                    VALUES (?, ?, ?, ?, ?, ?)""",
@@ -620,6 +668,17 @@ class Store:
             )
             connection.execute("UPDATE articles SET current_revision_id = ? WHERE id = ?", (cursor.lastrowid, article_id))
             return cursor.lastrowid, True
+
+    @staticmethod
+    def _hide_differences_against(connection: sqlite3.Connection, peer_url: str, superseded_hash: str) -> None:
+        """A peer article changed: differences assessed against its old text no longer describe what it says."""
+        connection.execute(
+            """UPDATE findings SET visible = 0, status = 'pending'
+               WHERE finding_type = 'material_cross_media_difference' AND visible = 1
+                 AND id IN (SELECT finding_id FROM evidence
+                            WHERE source_kind = 'related_article' AND content_hash = ? AND url = ?)""",
+            (superseded_hash, _display_url(peer_url)),
+        )
 
     def record_source_check(self, source_id: int, checked_at: str, status: str, candidates_seen: int, error: str | None) -> None:
         with self._connection() as connection:
@@ -823,10 +882,18 @@ class Store:
         model: str | None = None,
         prompt_version: str | None = None,
         completed_at: str | None = None,
-    ) -> None:
-        """Persist one completed analysis batch and mark its job completed in a single transaction."""
+        claimed_at: str | None = None,
+    ) -> bool:
+        """Persist one completed analysis batch and mark its job completed in a single transaction.
+
+        Returns False and writes nothing when the job is already completed or, with claimed_at (the
+        time passed to mark_analysis_running), when this worker no longer holds the running claim.
+        """
         finished = _utc_iso(completed_at) if completed_at else _iso(_moment(None))
+        claim = _utc_iso(claimed_at) if claimed_at else None
         with self._connection() as connection:
+            if not self._may_finish(connection, revision_id, claim):
+                return False
             claim_ids = self._save_claims(connection, revision_id, claims)
             by_span = {(claim.start, claim.end): claim_id for claim, claim_id in zip(claims, claim_ids)}
             by_provider_id = {claim.id: claim_id for claim, claim_id in zip(claims, claim_ids) if claim.id is not None}
@@ -842,8 +909,21 @@ class Store:
                 for item in batch:
                     self._save_evidence(connection, replace(item, finding_id=finding_id))
             self._mark_completed(connection, revision_id, finished, provider, model, prompt_version)
+            return True
 
     # --- analysis job state machine ------------------------------------------
+
+    @staticmethod
+    def _may_finish(connection: sqlite3.Connection, revision_id: int, claim: str | None) -> bool:
+        row = connection.execute(
+            "SELECT status, updated_at FROM revision_analysis WHERE revision_id = ?", (revision_id,)
+        ).fetchone()
+        if row is None:
+            return claim is None
+        status, updated_at = row
+        if status == "completed":
+            return False
+        return claim is None or (status == "running" and updated_at == claim)
 
     @staticmethod
     def _mark_completed(
@@ -868,62 +948,169 @@ class Store:
              _safe_provider_name(prompt_version)),
         )
 
-    def mark_analysis_running(self, revision_id: int, at: str) -> bool:
-        """Claim a revision's job; re-claiming an abandoned running job counts it as one failed attempt.
+    @staticmethod
+    def _is_current(connection: sqlite3.Connection, revision_id: int) -> bool:
+        row = connection.execute(
+            """SELECT 1 FROM articles JOIN article_revisions AS revisions ON revisions.article_id = articles.id
+               WHERE revisions.id = ? AND articles.current_revision_id = revisions.id""",
+            (revision_id,),
+        ).fetchone()
+        return row is not None
 
-        Returns False (and changes nothing) when the analysis is already completed.
+    def mark_analysis_running(
+        self, revision_id: int, at: str, *, max_attempts: int = 3, stale_after_minutes: int = STALE_AFTER_MINUTES
+    ) -> bool:
+        """Claim a revision's job for one worker; False (and nothing claimed) when it is not ours to run.
+
+        A job can be claimed when it has no row yet, is pending or skipped, failed fewer than
+        max_attempts times, or has been running since before at - stale_after_minutes (a crashed
+        run). Taking over a crashed run counts that run as one failed attempt; when this uses the
+        last attempt the job moves to failed instead of running again. A completed job, a job
+        another worker is still running and a superseded revision are never claimed. The claim is
+        made under the write lock, so two runs can never both hold it; pass `at` as claimed_at to
+        save_analysis and the mark_* methods so a worker whose claim was taken over cannot write.
         """
+        _require_positive("max_attempts", max_attempts)
+        _require_positive("stale_after_minutes", stale_after_minutes)
         started = _utc_iso(at)
+        cutoff = _moment(started) - timedelta(minutes=stale_after_minutes)
         with self._connection() as connection:
             self._require_revision(connection, revision_id)
-            cursor = connection.execute(
-                """INSERT INTO revision_analysis (revision_id, status, attempts, updated_at) VALUES (?, 'running', 0, ?)
-                   ON CONFLICT(revision_id) DO UPDATE SET
-                     status = 'running',
-                     attempts = revision_analysis.attempts + (revision_analysis.status = 'running'),
-                     last_error = CASE WHEN revision_analysis.status = 'running'
-                                       THEN 'previous analysis run did not finish'
-                                       ELSE revision_analysis.last_error END,
-                     updated_at = excluded.updated_at
-                   WHERE revision_analysis.status != 'completed'""",
-                (revision_id, started),
+            if not self._is_current(connection, revision_id):
+                return False
+            row = connection.execute(
+                "SELECT status, attempts, updated_at FROM revision_analysis WHERE revision_id = ?", (revision_id,)
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO revision_analysis (revision_id, status, attempts, updated_at) VALUES (?, 'running', 0, ?)",
+                    (revision_id, started),
+                )
+                return True
+            status, attempts, updated_at = row
+            if status == "completed" or (status == "failed" and attempts >= max_attempts):
+                return False
+            if status == "running":
+                if not _is_stale(updated_at, cutoff):
+                    return False
+                next_status = "running" if attempts + 1 < max_attempts else "failed"
+                connection.execute(
+                    """UPDATE revision_analysis SET status = ?, attempts = attempts + 1, last_error = ?, updated_at = ?
+                       WHERE revision_id = ?""",
+                    (next_status, ABANDONED_RUN_ERROR, started, revision_id),
+                )
+                return next_status == "running"
+            connection.execute(
+                "UPDATE revision_analysis SET status = 'running', updated_at = ? WHERE revision_id = ?",
+                (started, revision_id),
             )
+            return True
+
+    def _move_job(
+        self,
+        revision_id: int,
+        at: str,
+        status: str,
+        error: object,
+        claimed_at: str | None,
+        *,
+        attempts: str,
+        first_attempts: str,
+        protected: str,
+        floor: int = 0,
+    ) -> bool:
+        """Set a job's status; with claimed_at only while that claim still holds, else never over `protected`."""
+        values = {"revision": revision_id, "status": status, "error": _error_text(error), "at": _utc_iso(at), "floor": floor}
+        with self._connection() as connection:
+            self._require_revision(connection, revision_id)
+            if claimed_at is not None:
+                values["claim"] = _utc_iso(claimed_at)
+                cursor = connection.execute(
+                    f"""UPDATE revision_analysis
+                        SET status = :status, attempts = {attempts}, last_error = :error, updated_at = :at
+                        WHERE revision_id = :revision AND status = 'running' AND updated_at = :claim""",
+                    values,
+                )
+            else:
+                cursor = connection.execute(
+                    f"""INSERT INTO revision_analysis (revision_id, status, attempts, last_error, updated_at)
+                        VALUES (:revision, :status, {first_attempts}, :error, :at)
+                        ON CONFLICT(revision_id) DO UPDATE SET
+                          status = excluded.status,
+                          attempts = {attempts},
+                          last_error = excluded.last_error,
+                          updated_at = excluded.updated_at
+                        WHERE revision_analysis.status NOT IN ({protected})""",
+                    values,
+                )
             return cursor.rowcount == 1
 
-    def mark_analysis_failed(self, revision_id: int, at: str, error: str | None) -> bool:
-        """Record one failed attempt with a redacted, bounded error; False when already completed."""
-        failed = _utc_iso(at)
-        with self._connection() as connection:
-            self._require_revision(connection, revision_id)
-            cursor = connection.execute(
-                """INSERT INTO revision_analysis (revision_id, status, attempts, last_error, updated_at)
-                   VALUES (?, 'failed', 1, ?, ?)
-                   ON CONFLICT(revision_id) DO UPDATE SET
-                     status = 'failed',
-                     attempts = revision_analysis.attempts + 1,
-                     last_error = excluded.last_error,
-                     updated_at = excluded.updated_at
-                   WHERE revision_analysis.status != 'completed'""",
-                (revision_id, _error_text(error), failed),
-            )
-            return cursor.rowcount == 1
+    def mark_analysis_failed(
+        self,
+        revision_id: int,
+        at: str,
+        error: str | None,
+        *,
+        claimed_at: str | None = None,
+        final_attempts: int | None = None,
+    ) -> bool:
+        """Record one failed attempt with a redacted, bounded error; False when already completed.
 
-    def mark_analysis_skipped(self, revision_id: int, at: str, reason: str | None) -> bool:
-        """Defer a job without counting an attempt (e.g. budget reached); False when already completed."""
-        skipped = _utc_iso(at)
+        final_attempts raises the attempt count to at least that number, so the job is not retried
+        automatically (for example when it needs more AI calls than the daily limit allows).
+        """
+        return self._move_job(
+            revision_id, at, "failed", error, claimed_at,
+            attempts="MAX(revision_analysis.attempts + 1, :floor)", first_attempts="MAX(1, :floor)",
+            protected="'completed'", floor=final_attempts or 0,
+        )
+
+    def mark_analysis_skipped(self, revision_id: int, at: str, reason: str | None, *, claimed_at: str | None = None) -> bool:
+        """Defer a job without counting an attempt (e.g. budget reached); False when completed or run by another worker."""
+        return self._move_job(
+            revision_id, at, "skipped", reason, claimed_at,
+            attempts="revision_analysis.attempts", first_attempts="0", protected="'completed', 'running'",
+        )
+
+    def mark_analysis_pending(self, revision_id: int, at: str, reason: str | None, *, claimed_at: str | None = None) -> bool:
+        """Hand a job back unfinished without counting an attempt (e.g. the AI service rejected the key)."""
+        return self._move_job(
+            revision_id, at, "pending", reason, claimed_at,
+            attempts="revision_analysis.attempts", first_attempts="0", protected="'completed', 'running'",
+        )
+
+    def fail_abandoned_analyses(
+        self, now: str | datetime | None = None, *, max_attempts: int = 3, stale_after_minutes: int = STALE_AFTER_MINUTES
+    ) -> int:
+        """Move crashed running jobs that have no attempt left to failed, so none stays 分析中 forever."""
+        _require_positive("max_attempts", max_attempts)
+        _require_positive("stale_after_minutes", stale_after_minutes)
+        moment = _moment(now)
+        cutoff = moment - timedelta(minutes=stale_after_minutes)
         with self._connection() as connection:
-            self._require_revision(connection, revision_id)
-            cursor = connection.execute(
-                """INSERT INTO revision_analysis (revision_id, status, attempts, last_error, updated_at)
-                   VALUES (?, 'skipped', 0, ?, ?)
-                   ON CONFLICT(revision_id) DO UPDATE SET
-                     status = 'skipped',
-                     last_error = excluded.last_error,
-                     updated_at = excluded.updated_at
-                   WHERE revision_analysis.status != 'completed'""",
-                (revision_id, _error_text(reason), skipped),
+            rows = connection.execute(
+                "SELECT revision_id, updated_at FROM revision_analysis WHERE status = 'running' AND attempts + 1 >= ?",
+                (max_attempts,),
+            ).fetchall()
+            abandoned = [revision_id for revision_id, updated_at in rows if _is_stale(updated_at, cutoff)]
+            connection.executemany(
+                """UPDATE revision_analysis SET status = 'failed', attempts = attempts + 1, last_error = ?, updated_at = ?
+                   WHERE revision_id = ? AND status = 'running'""",
+                [(ABANDONED_RUN_ERROR, _iso(moment), revision_id) for revision_id in abandoned],
             )
-            return cursor.rowcount == 1
+            return len(abandoned)
+
+    def requeue_failed_analyses(self, at: str, revision_ids: Sequence[int] | None = None) -> int:
+        """Give failed jobs a fresh set of attempts (after the user fixed a key or asked to check again)."""
+        requeued = _utc_iso(at)
+        query = "UPDATE revision_analysis SET status = 'pending', attempts = 0, updated_at = ? WHERE status = 'failed'"
+        with self._connection() as connection:
+            if revision_ids is None:
+                return connection.execute(query, (requeued,)).rowcount
+            return sum(
+                connection.execute(f"{query} AND revision_id IN ({_placeholders(chunk)})", (requeued, *chunk)).rowcount
+                for chunk in _chunks(list(revision_ids))
+            )
 
     def analysis_status(self, revision_id: int) -> dict[str, object] | None:
         with self._connection(write=False) as connection:
@@ -959,34 +1146,42 @@ class Store:
         *,
         max_attempts: int = 3,
         now: str | datetime | None = None,
-        stale_after_minutes: int = 60,
+        stale_after_minutes: int = STALE_AFTER_MINUTES,
+        revision_ids: Sequence[int] | None = None,
     ) -> list[ArticleRevision]:
         """Return current revisions whose analysis is due, ordered by revision id.
 
         Due means: no job row, pending, skipped, failed fewer than max_attempts times, or
-        running since before now - stale_after_minutes (a crashed run). Superseded
-        revisions are never returned.
+        running since before now - stale_after_minutes (a crashed run) with an attempt left
+        for the takeover. Superseded revisions are never returned. revision_ids, when given,
+        restricts the result to those revisions.
         """
-        if limit < 1:
-            raise ValueError("limit must be positive")
-        if max_attempts < 1:
-            raise ValueError("max_attempts must be positive")
-        if stale_after_minutes < 1:
-            raise ValueError("stale_after_minutes must be positive")
+        _require_positive("limit", limit)
+        _require_positive("max_attempts", max_attempts)
+        _require_positive("stale_after_minutes", stale_after_minutes)
         cutoff = _iso(_moment(now) - timedelta(minutes=stale_after_minutes))
+        values: dict[str, object] = {"max_attempts": max_attempts, "cutoff": cutoff, "limit": limit}
+        only = ""
+        if revision_ids is not None:
+            ids = sorted({int(revision_id) for revision_id in revision_ids})[:_SQL_CHUNK]
+            if not ids:
+                return []
+            values.update({f"id{index}": revision_id for index, revision_id in enumerate(ids)})
+            only = "AND revisions.id IN (" + ", ".join(f":id{index}" for index in range(len(ids))) + ")"
         with self._connection(write=False) as connection:
             rows = connection.execute(
                 f"""SELECT {_REVISION_COLUMNS}
                    FROM articles
                    JOIN article_revisions AS revisions ON revisions.id = articles.current_revision_id
                    LEFT JOIN revision_analysis AS analysis ON analysis.revision_id = revisions.id
-                   WHERE analysis.revision_id IS NULL
-                      OR analysis.status IN ('pending', 'skipped')
-                      OR (analysis.status = 'failed' AND analysis.attempts < :max_attempts)
-                      OR (analysis.status = 'running' AND analysis.attempts < :max_attempts
-                          AND COALESCE(julianday(analysis.updated_at) < julianday(:cutoff), 1))
+                   WHERE (analysis.revision_id IS NULL
+                          OR analysis.status IN ('pending', 'skipped')
+                          OR (analysis.status = 'failed' AND analysis.attempts < :max_attempts)
+                          OR (analysis.status = 'running' AND analysis.attempts + 1 < :max_attempts
+                              AND COALESCE(julianday(analysis.updated_at) < julianday(:cutoff), 1)))
+                     {only}
                    ORDER BY revisions.id LIMIT :limit""",
-                {"max_attempts": max_attempts, "cutoff": cutoff, "limit": limit},
+                values,
             )
             return [ArticleRevision(*row) for row in rows]
 
@@ -1038,15 +1233,18 @@ class Store:
             )
             return cursor.lastrowid
 
-    def count_llm_calls_since(self, since_iso: str) -> int:
+    def count_llm_calls_since(self, since_iso: str, *, revision_id: int | None = None) -> int:
+        """Count ledger rows (one per request sent) since a UTC time, optionally for one revision only."""
         since = _sortable(since_iso)
+        query = f"SELECT COUNT(*) FROM llm_calls WHERE called_at >= ? AND {_sortable_sql('called_at')} >= ?"
+        values: tuple[object, ...] = (since[:19], since)
+        if revision_id is not None:
+            query += " AND revision_id = ?"
+            values += (revision_id,)
         with self._connection(write=False) as connection:
             # The 19-char second prefix sorts before every stored value of that second, so the
             # indexed range scan is a safe lower bound and the exact comparison does the rest.
-            return connection.execute(
-                f"SELECT COUNT(*) FROM llm_calls WHERE called_at >= ? AND {_sortable_sql('called_at')} >= ?",
-                (since[:19], since),
-            ).fetchone()[0]
+            return connection.execute(query, values).fetchone()[0]
 
     # --- same-topic grouping ---------------------------------------------------
 
@@ -1079,14 +1277,16 @@ class Store:
             )]
 
     @staticmethod
-    def _topic_for_revision(connection: sqlite3.Connection, revision_id: int) -> int | None:
+    def _topic_for_revision(
+        connection: sqlite3.Connection, revision_id: int, statuses: Sequence[str] = ("active", "possible")
+    ) -> int | None:
         row = connection.execute(
-            """SELECT topics.id FROM topic_articles
+            f"""SELECT topics.id FROM topic_articles
                JOIN topics ON topics.id = topic_articles.topic_id
-               WHERE topic_articles.revision_id = ? AND topics.status != 'dismissed'
+               WHERE topic_articles.revision_id = ? AND topics.status IN ({_placeholders(statuses)})
                ORDER BY CASE topics.status WHEN 'active' THEN 0 ELSE 1 END, topics.id
                LIMIT 1""",
-            (revision_id,),
+            (revision_id, *statuses),
         ).fetchone()
         return row[0] if row else None
 
@@ -1095,12 +1295,86 @@ class Store:
         with self._connection(write=False) as connection:
             return self._topic_for_revision(connection, revision_id)
 
-    def assign_topic(self, revision_id: int, peer_revision_id: int, label: str, confidence: str) -> int:
-        """Group a revision with a peer, joining the peer's (or the revision's) open topic when one exists.
+    @staticmethod
+    def _article_of(connection: sqlite3.Connection, revision_id: int) -> int:
+        return connection.execute("SELECT article_id FROM article_revisions WHERE id = ?", (revision_id,)).fetchone()[0]
 
-        A 'high' signal upgrades a joined topic to high confidence (possible -> active); nothing is
-        ever downgraded. When a reviewer already dismissed a topic linking exactly this pair, that
-        topic's id is returned unchanged so the machine cannot re-open a human decision.
+    @staticmethod
+    def _topic_linking_articles(
+        connection: sqlite3.Connection, first_article: int, second_article: int, statuses: Sequence[str]
+    ) -> tuple[int, str] | None:
+        """A topic of one of `statuses` holding some revision of both articles; active first, then oldest."""
+        # Driven from the first article's revisions, so it uses the article and topic-link indexes.
+        row = connection.execute(
+            f"""SELECT topics.id, topics.status
+               FROM article_revisions AS own_revision
+               JOIN topic_articles AS own ON own.revision_id = own_revision.id
+               JOIN topic_articles AS peer ON peer.topic_id = own.topic_id
+               JOIN article_revisions AS peer_revision ON peer_revision.id = peer.revision_id
+               JOIN topics ON topics.id = own.topic_id
+               WHERE own_revision.article_id = ? AND peer_revision.article_id = ?
+                 AND topics.status IN ({_placeholders(statuses)})
+               ORDER BY CASE topics.status WHEN 'active' THEN 0 ELSE 1 END, topics.id LIMIT 1""",
+            (first_article, second_article, *statuses),
+        ).fetchone()
+        return (row[0], row[1]) if row else None
+
+    @staticmethod
+    def _topic_articles(connection: sqlite3.Connection, topic_id: int) -> set[int]:
+        return {row[0] for row in connection.execute(
+            """SELECT DISTINCT revisions.article_id FROM topic_articles
+               JOIN article_revisions AS revisions ON revisions.id = topic_articles.revision_id
+               WHERE topic_articles.topic_id = ?""",
+            (topic_id,),
+        )}
+
+    def _can_join(self, connection: sqlite3.Connection, topic_id: int | None, article_id: int) -> bool:
+        """An article may join a topic only if a reviewer never separated it from one of the topic's articles."""
+        if topic_id is None:
+            return False
+        return all(
+            self._topic_linking_articles(connection, article_id, member, ("dismissed",)) is None
+            for member in self._topic_articles(connection, topic_id) - {article_id}
+        )
+
+    def _choose_topic(
+        self, connection: sqlite3.Connection, revision_id: int, peer_revision_id: int, confidence: str
+    ) -> tuple[int | None, bool]:
+        """Return (topic to join or None for a new one, whether to upgrade it to a confirmed pair)."""
+        own_article = self._article_of(connection, revision_id)
+        peer_article = self._article_of(connection, peer_revision_id)
+        shared = self._topic_linking_articles(connection, own_article, peer_article, ("active", "possible"))
+        if shared is not None and (shared[1] == "active" or confidence != "high"):
+            return shared[0], False  # these two articles are already grouped; keep that decision
+        if confidence != "high":
+            # A possible pairing never joins a confirmed topic, so it cannot be shown as 同題.
+            for topic_id, joining in (
+                (self._topic_for_revision(connection, peer_revision_id, ("possible",)), own_article),
+                (self._topic_for_revision(connection, revision_id, ("possible",)), peer_article),
+            ):
+                if self._can_join(connection, topic_id, joining):
+                    return topic_id, False
+            return None, False
+        if shared is not None and self._topic_articles(connection, shared[0]) == {own_article, peer_article}:
+            return shared[0], True  # a possible topic of exactly this pair becomes a confirmed pair
+        for topic_id, joining in (
+            (self._topic_for_revision(connection, peer_revision_id, ("active",)), own_article),
+            (self._topic_for_revision(connection, revision_id, ("active",)), peer_article),
+        ):
+            if self._can_join(connection, topic_id, joining):
+                return topic_id, False
+        return None, False
+
+    def assign_topic(self, revision_id: int, peer_revision_id: int, label: str, confidence: str) -> int:
+        """Group a revision with a peer and return the topic that now links them.
+
+        A reviewer's dismissal holds for the two articles, whatever their later revisions: the
+        dismissed topic's id is returned unchanged, so the machine cannot re-open a human decision,
+        and no topic ever brings two articles a reviewer separated back together. Two articles
+        already grouped keep that topic. Otherwise a 'high' signal joins an open active topic of
+        either side (or upgrades a possible topic of exactly this pair) and a 'possible' or 'low'
+        signal only joins or creates a possible topic, so an uncertain pairing is never shown as
+        同題. Nothing is ever downgraded.
         """
         _require_allowed("topic confidence", confidence, _TOPIC_CONFIDENCES)
         if revision_id == peer_revision_id:
@@ -1111,30 +1385,22 @@ class Store:
         with self._connection() as connection:
             self._require_revision(connection, revision_id)
             self._require_revision(connection, peer_revision_id)
-            dismissed = connection.execute(
-                """SELECT topics.id FROM topics
-                   JOIN topic_articles AS own ON own.topic_id = topics.id AND own.revision_id = ?
-                   JOIN topic_articles AS peer ON peer.topic_id = topics.id AND peer.revision_id = ?
-                   WHERE topics.status = 'dismissed' ORDER BY topics.id LIMIT 1""",
-                (revision_id, peer_revision_id),
-            ).fetchone()
+            dismissed = self._topic_linking_articles(
+                connection, self._article_of(connection, revision_id), self._article_of(connection, peer_revision_id),
+                ("dismissed",),
+            )
             if dismissed is not None:
                 return dismissed[0]
-            topic_id = self._topic_for_revision(connection, peer_revision_id)
-            if topic_id is None:
-                topic_id = self._topic_for_revision(connection, revision_id)
+            topic_id, upgrade = self._choose_topic(connection, revision_id, peer_revision_id, confidence)
             if topic_id is None:
                 cursor = connection.execute(
                     "INSERT INTO topics (label, confidence, status) VALUES (?, ?, ?)",
                     (safe_label, confidence, "active" if confidence == "high" else "possible"),
                 )
                 topic_id = cursor.lastrowid
-            elif confidence == "high":
+            elif upgrade:
                 connection.execute(
-                    """UPDATE topics SET confidence = 'high',
-                         status = CASE WHEN status = 'possible' THEN 'active' ELSE status END
-                       WHERE id = ?""",
-                    (topic_id,),
+                    "UPDATE topics SET label = ?, confidence = 'high', status = 'active' WHERE id = ?", (safe_label, topic_id)
                 )
             connection.executemany(
                 "INSERT OR IGNORE INTO topic_articles (topic_id, revision_id) VALUES (?, ?)",
@@ -1149,10 +1415,52 @@ class Store:
         return row[0] if row else None
 
     def set_topic_status(self, topic_id: int, status: str) -> bool:
+        """Record a reviewer's decision on a topic.
+
+        'active' confirms the grouping (it is then shown and used as same-topic context like a
+        high-confidence one); 'dismissed' also withdraws the cross-media differences that were
+        assessed between the topic's articles, since they rested on the grouping.
+        """
         _require_allowed("topic status", status, _TOPIC_STATUSES)
         with self._connection() as connection:
-            cursor = connection.execute("UPDATE topics SET status = ? WHERE id = ?", (status, topic_id))
+            if status == "active":
+                cursor = connection.execute("UPDATE topics SET status = 'active', confidence = 'high' WHERE id = ?", (topic_id,))
+            else:
+                cursor = connection.execute("UPDATE topics SET status = ? WHERE id = ?", (status, topic_id))
+            if cursor.rowcount == 1 and status == "dismissed":
+                self._withdraw_topic_differences(connection, topic_id)
             return cursor.rowcount == 1
+
+    def _withdraw_topic_differences(self, connection: sqlite3.Connection, topic_id: int) -> None:
+        articles = sorted(self._topic_articles(connection, topic_id))
+        urls = dict(connection.execute(
+            f"SELECT id, url FROM articles WHERE id IN ({_placeholders(articles)})", tuple(articles)
+        ).fetchall()) if articles else {}
+        for article_id in articles:
+            peer_urls = sorted({_display_url(url) for other, url in urls.items() if other != article_id})
+            if not peer_urls:
+                continue
+            connection.execute(
+                f"""UPDATE findings SET visible = 0, status = 'dismissed'
+                    WHERE finding_type = 'material_cross_media_difference' AND status != 'dismissed'
+                      AND revision_id IN (SELECT id FROM article_revisions WHERE article_id = ?)
+                      AND id IN (SELECT finding_id FROM evidence
+                                 WHERE source_kind = 'related_article' AND url IN ({_placeholders(peer_urls)}))""",
+                (article_id, *peer_urls),
+            )
+
+    def event_times(self, revision_ids: Sequence[int]) -> dict[int, str]:
+        """Return the known publication time of each revision's article, for the same-topic time window."""
+        times: dict[int, str] = {}
+        with self._connection(write=False) as connection:
+            for chunk in _chunks(list(revision_ids)):
+                times.update(connection.execute(
+                    f"""SELECT revisions.id, articles.published_at FROM article_revisions AS revisions
+                        JOIN articles ON articles.id = revisions.article_id
+                        WHERE revisions.id IN ({_placeholders(chunk)}) AND articles.published_at IS NOT NULL""",
+                    tuple(chunk),
+                ).fetchall())
+        return times
 
     # --- human review ----------------------------------------------------------
 
@@ -1185,25 +1493,45 @@ class Store:
                 grouped[finding_id].append(item)
         return grouped
 
-    def list_findings(self, limit: int = 50, *, visible_only: bool = True) -> list[dict[str, object]]:
-        """Return findings newest first with their evidence chain; URLs are redacted."""
+    def list_findings(
+        self, limit: int = 50, *, visible_only: bool = True, current_only: bool = True
+    ) -> list[dict[str, object]]:
+        """Return findings newest first with their evidence chain; URLs are redacted.
+
+        current_only (the default) leaves out findings on revisions an outlet has since replaced,
+        whose text the live article no longer contains; every item says whether it is_current.
+        """
         if limit < 1:
             raise ValueError("limit must be positive")
         with self._connection(write=False) as connection:
-            return self._list_findings(connection, limit, visible_only)
+            return self._list_findings(connection, limit, visible_only, current_only=current_only)
 
-    def _list_findings(self, connection: sqlite3.Connection, limit: int, visible_only: bool) -> list[dict[str, object]]:
+    def _list_findings(
+        self,
+        connection: sqlite3.Connection,
+        limit: int,
+        visible_only: bool,
+        *,
+        current_only: bool = True,
+        revision_id: int | None = None,
+    ) -> list[dict[str, object]]:
+        conditions = ["(findings.visible = 1 OR NOT :visible_only)"]
+        if current_only:
+            conditions.append("articles.current_revision_id = findings.revision_id")
+        if revision_id is not None:
+            conditions.append("findings.revision_id = :revision_id")
         rows = connection.execute(
-            """SELECT findings.id, findings.revision_id, revisions.article_id, revisions.title, articles.url, sources.name,
+            f"""SELECT findings.id, findings.revision_id, revisions.article_id, revisions.title, articles.url, sources.name,
                       findings.finding_type, findings.summary, findings.start, findings.end, findings.status,
-                      findings.evidence_status, findings.visible, findings.review_status, findings.reviewed_at
+                      findings.evidence_status, findings.visible, findings.review_status, findings.reviewed_at,
+                      articles.current_revision_id = findings.revision_id
                FROM findings
                JOIN article_revisions AS revisions ON revisions.id = findings.revision_id
                JOIN articles ON articles.id = revisions.article_id
                JOIN sources ON sources.id = articles.source_id
-               WHERE findings.visible = 1 OR NOT ?
-               ORDER BY findings.id DESC LIMIT ?""",
-            (int(visible_only), limit),
+               WHERE {' AND '.join(conditions)}
+               ORDER BY findings.id DESC LIMIT :limit""",
+            {"visible_only": int(visible_only), "revision_id": revision_id, "limit": limit},
         ).fetchall()
         evidence = self._evidence_for(connection, [row[0] for row in rows])
         return [
@@ -1223,22 +1551,26 @@ class Store:
                 "visible": bool(visible),
                 "review_status": review_status,
                 "reviewed_at": reviewed_at,
+                "is_current": bool(is_current),
                 "evidence": evidence[finding_id],
             }
             for (finding_id, revision_id, article_id, article_title, article_url, source, finding_type, summary,
-                 start, end, status, evidence_status, visible, review_status, reviewed_at) in rows
+                 start, end, status, evidence_status, visible, review_status, reviewed_at, is_current) in rows
         ]
 
-    def _inbox(self, connection: sqlite3.Connection, limit: int) -> list[dict[str, object]]:
+    def _inbox(self, connection: sqlite3.Connection, limit: int, *, revision_id: int | None = None) -> list[dict[str, object]]:
+        """Inbox cards for each article's current revision, or for exactly revision_id when given."""
+        where = "revisions.id = :revision_id" if revision_id is not None else "revisions.id = articles.current_revision_id"
         rows = connection.execute(
-            """SELECT articles.id, revisions.id, revisions.title, articles.url, sources.name, articles.published_at,
-                      revisions.fetched_at, revisions.text, COALESCE(analysis.status, 'unanalyzed')
-               FROM articles
-               JOIN article_revisions AS revisions ON revisions.id = articles.current_revision_id
+            f"""SELECT articles.id, revisions.id, revisions.title, articles.url, sources.name, articles.published_at,
+                      revisions.fetched_at, revisions.text, COALESCE(analysis.status, 'unanalyzed'), sources.kind = 'manual'
+               FROM article_revisions AS revisions
+               JOIN articles ON articles.id = revisions.article_id
                JOIN sources ON sources.id = articles.source_id
                LEFT JOIN revision_analysis AS analysis ON analysis.revision_id = revisions.id
-               ORDER BY revisions.fetched_at DESC, revisions.id DESC LIMIT ?""",
-            (limit,),
+               WHERE {where}
+               ORDER BY revisions.fetched_at DESC, revisions.id DESC LIMIT :limit""",
+            {"revision_id": revision_id, "limit": limit},
         ).fetchall()
         revision_ids = [row[1] for row in rows]
         annotations: dict[int, list[Finding]] = {revision_id: [] for revision_id in revision_ids}
@@ -1250,35 +1582,49 @@ class Store:
                    FROM findings WHERE revision_id IN ({_placeholders(chunk)}) ORDER BY start, end, id""",
                 tuple(chunk),
             )
-            for (finding_id, revision_id, claim_id, finding_type, summary, start, end, status, evidence_status,
+            for (finding_id, finding_revision, claim_id, finding_type, summary, start, end, status, evidence_status,
                  visible, review_status) in findings:
                 if visible:
-                    annotations[revision_id].append(Finding(
-                        finding_id, revision_id, claim_id, finding_type, summary, start, end, status,
+                    annotations[finding_revision].append(Finding(
+                        finding_id, finding_revision, claim_id, finding_type, summary, start, end, status,
                         evidence_status, True, review_status,
                     ))
                 elif status == "pending":
-                    pending[revision_id] += 1
+                    pending[finding_revision] += 1
         evidence = self._evidence_for(
             connection, [finding.id for items in annotations.values() for finding in items if finding.id is not None]
         )
         return [
             {
                 "article_id": article_id,
-                "revision_id": revision_id,
+                "revision_id": item_revision,
                 "title": title,
                 "url": _display_url(url),
                 "source": source,
+                "manual": bool(manual),
                 "published_at": published_at,
                 "updated_at": fetched_at,
                 "text": text,
                 "analysis_status": analysis_status,
-                "annotations": tuple(annotations[revision_id]),
-                "evidence": [item for finding in annotations[revision_id] for item in evidence[finding.id]],
-                "pending_findings": pending[revision_id],
+                "annotations": tuple(annotations[item_revision]),
+                "evidence": [item for finding in annotations[item_revision] for item in evidence[finding.id]],
+                "pending_findings": pending[item_revision],
             }
-            for article_id, revision_id, title, url, source, published_at, fetched_at, text, analysis_status in rows
+            for article_id, item_revision, title, url, source, published_at, fetched_at, text, analysis_status, manual in rows
         ]
+
+    def article_detail(self, revision_id: int) -> dict[str, object] | None:
+        """One revision as an inbox card plus all its findings (visible and not) and whether it is current."""
+        with self._connection(write=False) as connection:
+            items = self._inbox(connection, 1, revision_id=revision_id)
+            if not items:
+                return None
+            detail = dict(items[0])
+            detail["findings"] = self._list_findings(
+                connection, _MAX_DETAIL_FINDINGS, False, current_only=False, revision_id=revision_id
+            )
+            detail["is_current"] = self._is_current(connection, revision_id)
+            return detail
 
     @staticmethod
     def _comparisons(connection: sqlite3.Connection, limit: int) -> list[dict[str, object]]:
@@ -1332,6 +1678,7 @@ class Store:
                LEFT JOIN source_checks AS checks ON checks.id = (
                    SELECT id FROM source_checks WHERE source_id = sources.id
                    ORDER BY checked_at DESC, id DESC LIMIT 1)
+               WHERE sources.kind != 'manual'
                ORDER BY sources.id"""
         )
         return [
@@ -1364,4 +1711,5 @@ class Store:
                 "sources": self._source_health(connection),
                 "last_run": self._last_run(connection),
                 "analysis": self._analysis_counts(connection),
+                "monitoring_paused": self._monitoring_paused(connection),
             }

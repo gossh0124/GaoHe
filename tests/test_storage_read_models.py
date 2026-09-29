@@ -20,12 +20,12 @@ from gaohe.storage import Store
 
 SECRETS = ("SECRET-A", "SECRET-B", "SECRET-C", "SECRET-D", "SECRET-E", "SECRET-F", "hunter2", "user:pass")
 INBOX_KEYS = {
-    "article_id", "revision_id", "title", "url", "source", "published_at", "updated_at", "text",
+    "article_id", "revision_id", "title", "url", "source", "manual", "published_at", "updated_at", "text",
     "analysis_status", "annotations", "evidence", "pending_findings",
 }
 FINDING_KEYS = {
     "id", "revision_id", "article_id", "article_title", "article_url", "source", "finding_type", "summary",
-    "start", "end", "status", "evidence_status", "visible", "review_status", "reviewed_at", "evidence",
+    "start", "end", "status", "evidence_status", "visible", "review_status", "reviewed_at", "is_current", "evidence",
 }
 EVIDENCE_KEYS = {"url", "title", "provider", "retrieved_at", "relation", "status", "source_kind", "rationale"}
 SOURCE_KEYS = {"id", "name", "enabled", "status", "checked_at", "candidates_seen", "error"}
@@ -151,7 +151,7 @@ def url_fields(snapshot: dict) -> list[str]:
 def test_dashboard_snapshot_has_exactly_the_contract_keys(tmp_path: Path):
     snapshot = build_fixture(tmp_path).store.dashboard_snapshot()
 
-    assert set(snapshot) == {"inbox", "findings", "comparisons", "sources", "last_run", "analysis"}
+    assert set(snapshot) == {"inbox", "findings", "comparisons", "sources", "last_run", "analysis", "monitoring_paused"}
     assert all(set(item) == INBOX_KEYS for item in snapshot["inbox"])
     assert all(set(item) == FINDING_KEYS for item in snapshot["findings"])
     assert all(set(evidence) == EVIDENCE_KEYS for item in snapshot["findings"] for evidence in item["evidence"])
@@ -177,7 +177,7 @@ def test_dashboard_inbox_lists_current_revisions_newest_first_with_annotations(t
     closed = span(ALPHA_TEXT, "closed the harbor")
     assert alpha | {"annotations": None, "evidence": None} == {
         "article_id": 1, "revision_id": fixture.alpha_revision, "title": "Harbor closed",
-        "url": "https://alpha.test/harbor?session=%2A%2A%2A&page=2", "source": "Alpha Daily",
+        "url": "https://alpha.test/harbor?session=%2A%2A%2A&page=2", "source": "Alpha Daily", "manual": False,
         "published_at": "2026-09-18T02:50:00Z", "updated_at": "2026-09-18T05:00:00Z", "text": ALPHA_TEXT,
         "analysis_status": "completed", "annotations": None, "evidence": None, "pending_findings": 1,
     }
@@ -216,7 +216,8 @@ def test_list_findings_returns_newest_first_with_evidence_chain(tmp_path: Path):
         "source": "Alpha Daily", "finding_type": "factual_contradiction",
         "summary": "Port notice says the harbor stayed open", "start": span(ALPHA_TEXT, "closed the harbor")[0],
         "end": span(ALPHA_TEXT, "closed the harbor")[1], "status": "resolved", "evidence_status": "retrieved",
-        "visible": True, "review_status": "confirmed", "reviewed_at": "2026-09-18T06:00:00Z", "evidence": None,
+        "visible": True, "review_status": "confirmed", "reviewed_at": "2026-09-18T06:00:00Z", "is_current": True,
+        "evidence": None,
     }
     pending = everything[1]
     assert (pending["visible"], pending["review_status"], pending["reviewed_at"]) == (False, "unreviewed", None)
@@ -332,7 +333,7 @@ def test_empty_dashboard_snapshot(tmp_path: Path):
 
     assert store.dashboard_snapshot() == {
         "inbox": [], "findings": [], "comparisons": [], "sources": [], "last_run": None,
-        "analysis": {status: 0 for status in ANALYSIS_STATUSES} | {"unanalyzed": 0},
+        "analysis": {status: 0 for status in ANALYSIS_STATUSES} | {"unanalyzed": 0}, "monitoring_paused": False,
     }
 
 
