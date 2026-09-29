@@ -61,24 +61,31 @@ def test_assign_topic_creates_a_topic_linking_both_revisions(tmp_path: Path, con
     assert store.topic_id_for_revision(first) == store.topic_id_for_revision(second) == topic_id
 
 
-def test_assign_topic_joins_the_peer_topic_and_upgrades_possible_to_high(tmp_path: Path):
+def test_a_high_signal_upgrades_only_a_possible_topic_of_exactly_that_pair(tmp_path: Path):
     store, (first, second, third, _) = store_with_revisions(tmp_path)
-    topic_id = store.assign_topic(second, first, "Harbor closure", "possible")
+    possible = store.assign_topic(second, first, "Harbor closure", "possible")
 
-    assert store.assign_topic(third, first, "Different label", "high") == topic_id
+    # second was only possibly related to first, so a high first-third pair must not vouch for it.
+    confirmed = store.assign_topic(third, first, "Different label", "high")
 
-    assert topics(store) == [(topic_id, "Harbor closure", "high", "active")]
-    assert links(store) == [(topic_id, first), (topic_id, second), (topic_id, third)]
+    assert confirmed != possible
+    assert topics(store) == [(possible, "Harbor closure", "possible", "possible"), (confirmed, "Different label", "high", "active")]
+    assert links(store) == [(possible, first), (possible, second), (confirmed, first), (confirmed, third)]
+    assert store.assign_topic(second, first, "Harbor closure again", "high") == possible
+    assert topics(store)[0] == (possible, "Harbor closure again", "high", "active")
 
 
-def test_assign_topic_never_downgrades_an_existing_topic(tmp_path: Path):
+def test_assign_topic_never_downgrades_or_widens_a_confirmed_topic(tmp_path: Path):
     store, (first, second, third, _) = store_with_revisions(tmp_path)
     topic_id = store.assign_topic(second, first, "Harbor closure", "high")
 
-    assert store.assign_topic(third, first, "Harbor closure", "possible") == topic_id
-    assert store.assign_topic(third, second, "Harbor closure", "low") == topic_id
+    possible = store.assign_topic(third, first, "Harbor closure", "possible")
+    assert possible != topic_id
+    assert store.assign_topic(third, second, "Harbor closure", "low") == possible
+    assert store.assign_topic(first, second, "Harbor closure", "possible") == topic_id
 
-    assert topics(store) == [(topic_id, "Harbor closure", "high", "active")]
+    assert topics(store) == [(topic_id, "Harbor closure", "high", "active"), (possible, "Harbor closure", "possible", "possible")]
+    assert [link for link in links(store) if link[0] == topic_id] == [(topic_id, first), (topic_id, second)]
 
 
 def test_assign_topic_uses_the_revision_topic_when_the_peer_has_none(tmp_path: Path):

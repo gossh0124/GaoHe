@@ -17,7 +17,7 @@ from gaohe import cli
 from gaohe.config import load_settings
 from gaohe.domain import RetrievedPage, SearchHit, Source
 from gaohe.monitor import watch_once
-from gaohe.pipeline import SUMMARY_KEYS, run_pending_analysis
+from gaohe.pipeline import SUMMARY_KEYS, run_pending_analysis, utc_iso
 from gaohe.providers import GeminiAnalysisProvider, GeminiEvidenceAssessor
 from gaohe.sources import HttpResponse
 from gaohe.storage import Store
@@ -201,7 +201,7 @@ def test_two_chinese_feeds_become_assessed_visible_findings_on_the_local_page(tm
 
     summary = _analyze(settings, store, gemini)
 
-    assert summary == dict(zip(SUMMARY_KEYS, (4, 4, 3, 1, 2, 0, 2, 0, 0)))
+    assert summary == dict(zip(SUMMARY_KEYS, (4, 4, 3, 1, 2, 0, 2, 0, 0, 0, "")))
     assert gemini.kinds.count("analysis") == 2 and gemini.kinds.count("assessment") == 3
     with sqlite3.connect(store.path) as connection:
         ledger = connection.execute("SELECT provider, model, purpose, status FROM llm_calls ORDER BY id").fetchall()
@@ -261,6 +261,8 @@ def test_provider_failure_for_one_revision_leaves_the_other_completed(tmp_path):
 def test_reached_budget_defers_both_revisions_to_a_later_run(tmp_path):
     _, settings, store = _setup(tmp_path)
     gemini = FakeGemini()
+    # Another run already spent one of today's two calls, so the first revision stops after its analysis.
+    store.record_llm_call(utc_iso(NOW), "gemini", MODEL, "analysis", None, "ok")
 
     summary = run_pending_analysis(
         store,
@@ -270,7 +272,7 @@ def test_reached_budget_defers_both_revisions_to_a_later_run(tmp_path):
         10,
         assessor=GeminiEvidenceAssessor(settings, request=gemini, sleep=lambda seconds: None),
         now=NOW,
-        daily_llm_call_limit=1,
+        daily_llm_call_limit=2,
     )
 
     assert (summary["analyzed"], summary["skipped"]) == (0, 2)

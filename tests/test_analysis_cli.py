@@ -15,13 +15,13 @@ from gaohe.domain import (
     Source,
     article_content_hash,
 )
-from gaohe.pipeline import SUMMARY_KEYS
+from gaohe.pipeline import empty_summary
 from gaohe.providers import AnalysisResult, FindingCandidate
 from gaohe.storage import Store
 
 
-def _summary(**counts: int) -> dict[str, int]:
-    return {key: counts.get(key, 0) for key in SUMMARY_KEYS}
+def _summary(**counts: int | str) -> dict[str, int | str]:
+    return empty_summary() | counts
 
 
 class FakeAnalysis:
@@ -232,9 +232,10 @@ def test_analyze_cli_prints_only_counts_and_hides_secret_article_text(tmp_path, 
 
     assert main(["analyze", "--pending", "--env-file", str(env_file)]) == 0
     output = capsys.readouterr().out
-    assert output == (
+    # The CLI may print more keys (stopped, stop_code) after the counts.
+    assert output.startswith(
         "claims=1 candidates=0 visible_findings=0 pending=0 retrieval_failures=0 "
-        "rejected_claims=0 analyzed=1 failed=0 skipped=0\n"
+        "rejected_claims=0 analyzed=1 failed=0 skipped=0"
     )
     assert "Taipei Ministry" not in output
     assert "super-secret" not in output
@@ -257,9 +258,9 @@ def test_analyze_cli_wires_the_evidence_assessor_and_daily_call_limit(tmp_path, 
     assert main(["analyze", "--pending", "--env-file", str(env_file)]) == 0
     # The first revision spends two calls; the second spends the last one on analysis and is
     # deferred before its assessment.
-    assert capsys.readouterr().out == (
+    assert capsys.readouterr().out.startswith(
         "claims=1 candidates=1 visible_findings=1 pending=0 retrieval_failures=0 "
-        "rejected_claims=0 analyzed=1 failed=0 skipped=1\n"
+        "rejected_claims=0 analyzed=1 failed=0 skipped=1"
     )
     assert len(assessor.calls) == 1
     assert store.analysis_status(2)["status"] == "skipped"

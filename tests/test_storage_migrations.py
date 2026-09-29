@@ -308,7 +308,7 @@ def test_old_schema_database_upgrades_without_data_loss(tmp_path: Path):
     assert query(
         database,
         "SELECT id, revision_id, claim_id, summary, status, visible, review_status, reviewed_at, review_note FROM findings",
-    ) == [(1, 1, 1, "Old finding", "resolved", 1, "unreviewed", None, None)]
+    ) == [(1, 1, 1, "Old finding", "pending", 0, "unreviewed", None, None)]  # unassessed: hidden by migration 6
     assert query(database, "SELECT id, finding_id, url, excerpt, provider, content_hash, rationale FROM evidence") == [
         (1, 1, "https://evidence.test/old", "Old excerpt", "provider-a", "hash-old", None),
     ]

@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from gaohe.domain import ANALYSIS_STATUSES, ArticleCandidate, Claim, Evidence, FetchedArticle, Finding, Source, article_content_hash
-from gaohe.storage import Store
+from gaohe.storage import ABANDONED_RUN_ERROR, Store
 
 
 NOW = "2026-09-18T12:00:00Z"
@@ -127,16 +127,20 @@ def test_list_pending_rejects_non_positive_bounds(tmp_path: Path, options: dict)
 
 def test_reclaiming_an_abandoned_running_job_counts_one_attempt(tmp_path: Path):
     store, (revision_id, *_) = store_with_articles(tmp_path, 1)
+    # Each run crashes mid-analysis; the next one starts two hours later.
+    starts = ("2026-09-18T04:00:00Z", "2026-09-18T06:00:00Z", "2026-09-18T08:00:00Z")
 
-    for crash in range(1, 4):
-        assert pending_ids(store, now="2026-09-19T00:00:00Z") == [revision_id]
-        store.mark_analysis_running(revision_id, "2026-09-18T04:00:00Z")
+    for crash, started in enumerate(starts, start=1):
+        assert pending_ids(store, now=started) == [revision_id]
+        assert store.mark_analysis_running(revision_id, started) is True
         assert store.analysis_status(revision_id)["attempts"] == crash - 1
 
-    assert store.analysis_status(revision_id)["last_error"] == "previous analysis run did not finish"
-    store.mark_analysis_running(revision_id, "2026-09-18T04:00:00Z")
-    assert store.analysis_status(revision_id)["attempts"] == 3
-    assert pending_ids(store, now="2026-09-19T00:00:00Z") == []
+    assert store.analysis_status(revision_id)["last_error"] == ABANDONED_RUN_ERROR
+    # The third crash used the last attempt: the job is failed, not listed and never 分析中 forever.
+    assert pending_ids(store, now="2026-09-18T10:00:00Z") == []
+    assert store.mark_analysis_running(revision_id, "2026-09-18T10:00:00Z") is False
+    status = store.analysis_status(revision_id)
+    assert (status["status"], status["attempts"]) == ("failed", 3)
 
 
 def test_job_transitions_record_timestamps_attempts_and_redacted_errors(tmp_path: Path):
