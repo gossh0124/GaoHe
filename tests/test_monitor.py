@@ -40,7 +40,8 @@ def rss(url="https://example.test/story", title="Story"):
 def monitor(settings, store, transport):
     from gaohe.monitor import watch_once
 
-    return watch_once(settings, store, transport, now=NOW)
+    # Per-host politeness would otherwise really sleep between the feed and article requests.
+    return watch_once(settings, store, transport, now=NOW, sleep=lambda _seconds: None)
 
 
 def make_store(tmp_path):
