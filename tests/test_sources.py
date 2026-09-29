@@ -1,3 +1,4 @@
+import gaohe
 import gaohe.sources as sources
 import pytest
 from gaohe.sources import (
@@ -45,7 +46,7 @@ def test_urllib_transport_uses_bounded_request_and_removes_authorization_headers
     assert response.headers == {"Content-Type": "text/plain; charset=utf-8"}
     assert response.body == b"ok"
     assert seen == {
-        "agent": "GaoHe/0.1 source-monitor (stdlib)",
+        "agent": f"GaoHe/{gaohe.__version__} source-monitor (stdlib)",
         "read_size": MAX_RESPONSE_BYTES + 1,
         "timeout": 3.5,
         "url": "https://example.test/start",
@@ -86,6 +87,167 @@ def test_urllib_transport_clamps_large_timeout_before_opening_connection(monkeyp
 def test_urllib_transport_rejects_non_positive_timeouts(timeout_seconds):
     with pytest.raises(ValueError, match="timeout_seconds must be positive"):
         sources.UrllibTransport().fetch("https://example.test/start", timeout_seconds=timeout_seconds)
+
+
+class _Opened:
+    status = 200
+
+    def __init__(self, headers=None, body=b"ok"):
+        self.headers = headers or {}
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def geturl(self):
+        return "https://example.test/final"
+
+    def read(self, _size):
+        return self.body
+
+
+def test_urllib_transport_sends_only_conditional_get_validators(monkeypatch):
+    seen: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout):
+        seen["headers"] = dict(request.header_items())
+        return _Opened()
+
+    monkeypatch.setattr(sources, "urlopen", fake_urlopen)
+
+    sources.UrllibTransport().fetch(
+        "https://example.test/start",
+        headers={
+            "if-none-match": ' "v1" ',
+            "If-Modified-Since": "Thu, 18 Sep 2026 10:00:00 GMT",
+            "Authorization": "Bearer secret-token",
+            "Cookie": "session=secret",
+            "User-Agent": "spoofed",
+            "X-Goog-Api-Key": "secret-key",
+        },
+    )
+
+    assert seen["headers"] == {
+        "User-agent": sources.USER_AGENT,
+        "If-none-match": '"v1"',
+        "If-modified-since": "Thu, 18 Sep 2026 10:00:00 GMT",
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    ['"v1"\r\nX-Injected: yes', "\u7248\u672c", "x" * (sources.MAX_REQUEST_HEADER_CHARS + 1), "   ", None, 7],
+)
+def test_urllib_transport_drops_unsafe_validator_values(monkeypatch, value):
+    seen: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout):
+        seen["headers"] = dict(request.header_items())
+        return _Opened()
+
+    monkeypatch.setattr(sources, "urlopen", fake_urlopen)
+
+    sources.UrllibTransport().fetch("https://example.test/start", headers={"If-None-Match": value})
+
+    assert seen["headers"] == {"User-agent": sources.USER_AGENT}
+
+
+def test_urllib_transport_maps_not_modified_to_an_empty_304_response(monkeypatch):
+    from email.message import Message
+    from io import BytesIO
+    from urllib.error import HTTPError
+
+    headers = Message()
+    headers["ETag"] = '"v2"'
+    headers["Authorization"] = "removed"
+    body = BytesIO(b"must not be read")
+
+    def fake_urlopen(request, timeout):
+        raise HTTPError(request.full_url, 304, "Not Modified", headers, body)
+
+    monkeypatch.setattr(sources, "urlopen", fake_urlopen)
+
+    response = sources.UrllibTransport().fetch("https://example.test/start", headers={"If-None-Match": '"v1"'})
+
+    assert response == sources.HttpResponse(304, "https://example.test/start", {"ETag": '"v2"'}, b"")
+    assert body.closed
+
+
+def test_urllib_transport_still_reads_other_http_error_bodies(monkeypatch):
+    from email.message import Message
+    from io import BytesIO
+    from urllib.error import HTTPError
+
+    headers = Message()
+    headers["Content-Type"] = "text/html"
+    body = BytesIO(b"gone")
+
+    def fake_urlopen(request, timeout):
+        raise HTTPError(request.full_url, 410, "Gone", headers, body)
+
+    monkeypatch.setattr(sources, "urlopen", fake_urlopen)
+
+    response = sources.UrllibTransport().fetch("https://example.test/start")
+
+    assert (response.status, response.headers, response.body) == (410, {"Content-Type": "text/html"}, b"gone")
+    assert body.closed
+
+
+def test_urllib_transport_conditional_get_round_trip_on_loopback(monkeypatch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    received: list[dict[str, str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server naming
+            received.append(dict(self.headers.items()))
+            if self.headers.get("If-None-Match") == '"v1"':
+                self.send_response(304)
+                self.send_header("ETag", '"v1"')
+                self.end_headers()
+                return
+            body = b"<rss></rss>"
+            self.send_response(200)
+            self.send_header("ETag", '"v1"')
+            self.send_header("Last-Modified", "Thu, 18 Sep 2026 10:00:00 GMT")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    for name in ("http_proxy", "HTTP_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/feed"
+        transport = sources.UrllibTransport()
+        first = transport.fetch(url, timeout_seconds=5)
+        second = transport.fetch(
+            url,
+            timeout_seconds=5,
+            headers={"If-None-Match": first.headers["ETag"], "Authorization": "Bearer secret-token"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert (first.status, first.body, first.headers["Last-Modified"]) == (200, b"<rss></rss>", "Thu, 18 Sep 2026 10:00:00 GMT")
+    assert (second.status, second.body, second.headers["ETag"]) == (304, b"", '"v1"')
+    assert "If-None-Match" not in received[0]
+    assert received[1]["If-None-Match"] == '"v1"'
+    assert received[1]["User-Agent"] == sources.USER_AGENT
+    assert "Authorization" not in received[1]
 
 
 def test_parse_rss_preserves_article_metadata_and_rejects_relative_links():
