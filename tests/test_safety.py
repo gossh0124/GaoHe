@@ -38,3 +38,51 @@ def test_url_predicates():
     assert not is_source_url("https://example.test/a b") and not is_source_url("https://example.test:99999/")
     assert canonical_url("HTTPS://Example.TEST/Path?q=1#frag") == "https://example.test/Path?q=1"
     assert canonical_url("https://u:p@example.test/") is None
+
+
+@pytest.mark.parametrize("url, secret", [
+    ("https://wire.example.com/v1/rss?apiKey=WIRE-SECRET-123&lang=zh", "WIRE-SECRET-123"),
+    ("https://x.test/a?access_key=AK-SECRET", "AK-SECRET"),
+    ("https://x.test/a?sig=SIG-SECRET&auth=AUTH-SECRET", "SIG-SECRET"),
+    ("https://x.test/a?a=1;token=SEMI-SECRET", "SEMI-SECRET"),
+    ("https://x.test/a?next=https%3A%2F%2Fy.test%2F%3Fapi_key%3DNESTED-SECRET", "NESTED-SECRET"),
+])
+def test_redact_url_masks_compact_names_nested_and_semicolon_secrets(url, secret):
+    assert secret not in redact_url(url)
+    assert "AUTH-SECRET" not in redact_url("https://x.test/a?auth=AUTH-SECRET")
+
+
+def test_header_rule_keeps_ordinary_prose_but_masks_header_lines():
+    prose = "In the special session, the speaker said: the council approved 1000 new troops."
+    assert redact_text(prose) == prose
+    assert redact_text("立法院臨時會 session 中，院長表示：通過預算。") == "立法院臨時會 session 中，院長表示：通過預算。"
+    assert "abc123" not in redact_text("Set-Cookie: sid=abc123\nX-Api-Key: abc123\nAuthorization: Bearer abc123")
+
+
+def _resolver(mapping):
+    def resolve(host, port):
+        if host not in mapping:
+            raise OSError("no such host")
+        return [(2, 1, 6, "", (address, 0)) for address in mapping[host]]
+    return resolve
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("https://news.example/a", True),
+    ("http://127.0.0.1:8000/", False),
+    ("http://localhost/", False),
+    ("http://[::1]/", False),
+    ("http://169.254.169.254/latest/meta-data", False),
+    ("http://10.0.0.5/", False),
+    ("http://192.168.1.1/", False),
+    ("http://[::ffff:127.0.0.1]/", False),
+    ("http://internal.example/", False),
+    ("http://missing.example/", False),
+    ("https://u:p@news.example/", False),
+    ("ftp://news.example/", False),
+])
+def test_is_public_http_url_refuses_local_private_and_unresolvable_hosts(url, expected):
+    from gaohe.safety import is_public_http_url
+
+    resolver = _resolver({"news.example": ["93.184.216.34"], "internal.example": ["93.184.216.34", "10.1.2.3"]})
+    assert is_public_http_url(url, resolver=resolver) is expected

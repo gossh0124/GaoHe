@@ -269,3 +269,41 @@ def extract_article_text(body: bytes, content_type: str | None = None) -> str:
     except ValueError:
         return ""
     return "\n".join(parser.parts)
+
+
+_FEED_TYPES = {"application/rss+xml", "application/atom+xml", "application/feed+json", "application/xml", "text/xml"}
+
+
+class _FeedLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "link":
+            return
+        values = {name.lower(): (value or "") for name, value in attrs}
+        rels = values.get("rel", "").lower().split()
+        if "alternate" in rels and values.get("type", "").lower().split(";")[0].strip() in _FEED_TYPES and values.get("href"):
+            self.links.append(values["href"])
+
+
+def discover_feeds(body: bytes, base_url: str, content_type: str | None = None) -> list[str]:
+    """Return absolute RSS/Atom URLs a web page advertises with <link rel="alternate">, in page order.
+
+    Lets people paste a media homepage instead of hunting for its feed address.
+    """
+    if len(body) > MAX_RESPONSE_BYTES:
+        return []
+    parser = _FeedLinkParser()
+    try:
+        parser.feed(_decoded(body, content_type))
+        parser.close()
+    except ValueError:
+        return []
+    feeds: list[str] = []
+    for href in parser.links:
+        url = urljoin(base_url, href.strip())
+        if _is_http_url(url) and url not in feeds:
+            feeds.append(url)
+    return feeds[:MAX_CANDIDATES]

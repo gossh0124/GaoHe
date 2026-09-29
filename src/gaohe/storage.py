@@ -416,14 +416,29 @@ def _migration_4_indexes(connection: sqlite3.Connection) -> None:
     ))
 
 
+def _migration_5_app_state_and_source_kind(connection: sqlite3.Connection) -> None:
+    # kind separates polled feeds from the pseudo-source that owns manually checked single articles.
+    _add_column(connection, "sources", "kind", "TEXT NOT NULL DEFAULT 'feed'")
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS app_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"""
+    )
+
+
 # Append-only: never edit or reorder a released step; add a new one instead.
 _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _migration_1_baseline,
     _migration_2_analysis_jobs,
     _migration_3_review_fetch_state_and_ledger,
     _migration_4_indexes,
+    _migration_5_app_state_and_source_kind,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
+MANUAL_SOURCE_NAME = "單篇查核"
+MANUAL_SOURCE_FEED_URL = "gaohe:manual"
 
 
 class Store:
@@ -513,17 +528,49 @@ class Store:
             )
             return connection.execute("SELECT id FROM sources WHERE feed_url = ?", (source.feed_url,)).fetchone()[0]
 
-    def list_sources(self, enabled_only: bool = False) -> list[Source]:
+    def list_sources(self, enabled_only: bool = False, *, include_manual: bool = False) -> list[Source]:
         with self._connection(write=False) as connection:
-            query = "SELECT id, name, feed_url, article_url, enabled FROM sources"
+            conditions = []
             if enabled_only:
-                query += " WHERE enabled = 1"
-            return [Source(row[0], row[1], row[2], row[3], bool(row[4])) for row in connection.execute(query)]
+                conditions.append("enabled = 1")
+            if not include_manual:
+                conditions.append("kind != 'manual'")
+            query = "SELECT id, name, feed_url, article_url, enabled, kind FROM sources"
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            return [Source(row[0], row[1], row[2], row[3], bool(row[4]), row[5]) for row in connection.execute(query)]
 
     def set_source_enabled(self, source_id: int, enabled: bool) -> bool:
         with self._connection() as connection:
-            cursor = connection.execute("UPDATE sources SET enabled = ? WHERE id = ?", (int(enabled), source_id))
+            cursor = connection.execute(
+                "UPDATE sources SET enabled = ? WHERE id = ? AND kind != 'manual'", (int(enabled), source_id)
+            )
             return cursor.rowcount == 1
+
+    def ensure_manual_source(self) -> int:
+        """Return the id of the never-polled pseudo-source that owns manually checked single articles."""
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO sources (name, feed_url, article_url, enabled, kind)
+                   VALUES (?, ?, NULL, 0, 'manual') ON CONFLICT(feed_url) DO NOTHING""",
+                (MANUAL_SOURCE_NAME, MANUAL_SOURCE_FEED_URL),
+            )
+            return connection.execute("SELECT id FROM sources WHERE feed_url = ?", (MANUAL_SOURCE_FEED_URL,)).fetchone()[0]
+
+    # --- app state -----------------------------------------------------------
+
+    def monitoring_paused(self) -> bool:
+        with self._connection(write=False) as connection:
+            row = connection.execute("SELECT value FROM app_state WHERE key = 'monitoring_paused'").fetchone()
+            return row is not None and row[0] == "1"
+
+    def set_monitoring_paused(self, paused: bool, at: str) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO app_state (key, value, updated_at) VALUES ('monitoring_paused', ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at""",
+                ("1" if paused else "0", _utc_iso(at)),
+            )
 
     @staticmethod
     def _save_candidate(connection: sqlite3.Connection, candidate) -> tuple[int, int | None]:

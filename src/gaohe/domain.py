@@ -23,6 +23,7 @@ class Source:
     feed_url: str
     article_url: str | None = None
     enabled: bool = True
+    kind: str = "feed"
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,16 @@ class TopicGroup:
     label: str
     confidence: str
     status: str
+
+
+@dataclass(frozen=True)
+class CheckOutcome:
+    """Result of checking one user-supplied article URL on demand (never an article verdict)."""
+
+    status: str  # completed | failed | skipped | invalid_url | fetch_failed
+    message: str  # plain zh-TW explanation of what happened and what to do next
+    revision_id: int | None = None
+    article_id: int | None = None
 
 
 @dataclass(frozen=True)
