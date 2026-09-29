@@ -23,6 +23,16 @@ def _read_env_file(path: Path | None) -> dict[str, str]:
     return values
 
 
+def _positive_int(name: str, raw: str) -> int:
+    try:
+        number = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if number <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return number
+
+
 @dataclass(frozen=True)
 class Settings:
     llm_provider: str = ""
@@ -32,6 +42,7 @@ class Settings:
     firecrawl_api_key: str = field(default="", repr=False)
     data_dir: Path = field(default_factory=lambda: Path.home() / "AppData" / "Local" / "GaoHe")
     poll_interval_minutes: int = 60
+    daily_llm_call_limit: int = 200
 
     @property
     def database_path(self) -> Path:
@@ -75,13 +86,8 @@ def load_settings(
             candidate = ""
         return candidate or default
 
-    interval_value = value("POLL_INTERVAL_MINUTES", "60")
-    try:
-        poll_interval_minutes = int(interval_value)
-    except ValueError as error:
-        raise ValueError("POLL_INTERVAL_MINUTES must be a positive integer") from error
-    if poll_interval_minutes <= 0:
-        raise ValueError("POLL_INTERVAL_MINUTES must be a positive integer")
+    poll_interval_minutes = _positive_int("POLL_INTERVAL_MINUTES", value("POLL_INTERVAL_MINUTES", "60"))
+    daily_llm_call_limit = _positive_int("DAILY_LLM_CALL_LIMIT", value("DAILY_LLM_CALL_LIMIT", "200"))
 
     data_dir = value(
         "DATA_DIR",
@@ -95,4 +101,5 @@ def load_settings(
         firecrawl_api_key=value("FIRECRAWL_API_KEY", ""),
         data_dir=Path(data_dir),
         poll_interval_minutes=poll_interval_minutes,
+        daily_llm_call_limit=daily_llm_call_limit,
     )

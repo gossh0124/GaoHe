@@ -943,15 +943,20 @@ class Store:
             )
             return [ArticleRevision(*row) for row in rows]
 
-    def list_recent_revisions(self, limit: int = 100) -> list[ArticleRevision]:
-        """Return a bounded local context pool; callers must apply topic rules."""
+    def list_recent_revisions(self, limit: int = 100, *, current_only: bool = False) -> list[ArticleRevision]:
+        """Return a bounded local context pool; callers must apply topic rules.
+
+        current_only keeps just each article's current revision, so superseded text never acts as a peer.
+        """
         if limit < 1:
             raise ValueError("limit must be positive")
+        current = "WHERE articles.current_revision_id = revisions.id" if current_only else ""
         with self._connection(write=False) as connection:
             return [ArticleRevision(*row) for row in connection.execute(
                 f"""SELECT {_REVISION_COLUMNS}
                    FROM article_revisions AS revisions
                    JOIN articles ON articles.id = revisions.article_id
+                   {current}
                    ORDER BY revisions.fetched_at DESC, revisions.id DESC LIMIT ?""",
                 (limit,),
             )]
@@ -1089,6 +1094,12 @@ class Store:
                 [(topic_id, revision_id), (topic_id, peer_revision_id)],
             )
             return topic_id
+
+    def topic_status(self, topic_id: int) -> str | None:
+        """Return a topic's status ('active', 'possible' or 'dismissed'), or None when it does not exist."""
+        with self._connection(write=False) as connection:
+            row = connection.execute("SELECT status FROM topics WHERE id = ?", (topic_id,)).fetchone()
+        return row[0] if row else None
 
     def set_topic_status(self, topic_id: int, status: str) -> bool:
         _require_allowed("topic status", status, _TOPIC_STATUSES)

@@ -4,9 +4,24 @@ import sqlite3
 from gaohe.cli import main, run_pending_analysis
 import pytest
 
-from gaohe.domain import ArticleCandidate, Claim, Evidence, FetchedArticle, Finding, SearchHit, Source, article_content_hash
+from gaohe.domain import (
+    ArticleCandidate,
+    Claim,
+    Evidence,
+    EvidenceAssessment,
+    FetchedArticle,
+    Finding,
+    SearchHit,
+    Source,
+    article_content_hash,
+)
+from gaohe.pipeline import SUMMARY_KEYS
 from gaohe.providers import AnalysisResult, FindingCandidate
 from gaohe.storage import Store
+
+
+def _summary(**counts: int) -> dict[str, int]:
+    return {key: counts.get(key, 0) for key in SUMMARY_KEYS}
 
 
 class FakeAnalysis:
@@ -58,6 +73,21 @@ class EmptyFetcher:
         raise AssertionError("no evidence should be fetched")
 
 
+class PeerContradictsAssessor:
+    """Reads a same-topic peer as contradicting the claim, quoting the peer verbatim."""
+
+    provider_name = "fake"
+    model = "fake-assessor"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    def assess(self, claim_text, revision, evidence, finding_type):
+        self.calls.append((claim_text, revision.id, evidence.source_kind, finding_type))
+        quote = evidence.excerpt.split(";")[0]
+        return EvidenceAssessment("contradicts", "The peer article reports a different troop count.", quote)
+
+
 def _store_with_revisions(tmp_path: Path, count: int = 1) -> Store:
     store = Store(tmp_path / "gaohe.db")
     store.initialize()
@@ -95,7 +125,7 @@ def test_runner_persists_ordinary_claims_without_visible_findings_and_hides_arti
 
     summary = run_pending_analysis(store, analysis, FakeSearch(), EmptyFetcher(), 10)
 
-    assert summary == {"claims": 1, "candidates": 0, "visible_findings": 0, "pending": 0, "retrieval_failures": 0}
+    assert summary == _summary(claims=1, analyzed=1)
     assert store.list_pending_revisions() == []
     assert "Taipei Ministry" not in str(summary)
 
@@ -111,7 +141,7 @@ def test_runner_counts_retrieval_failure_but_completes_revision(tmp_path):
         10,
     )
 
-    assert summary == {"claims": 1, "candidates": 1, "visible_findings": 0, "pending": 1, "retrieval_failures": 1}
+    assert summary == _summary(claims=1, candidates=1, pending=1, retrieval_failures=1, analyzed=1)
     assert store.list_pending_revisions() == []
     with sqlite3.connect(store.path) as connection:
         assert connection.execute("SELECT claim_id FROM findings").fetchone()[0] == 1
@@ -131,25 +161,44 @@ def test_runner_persists_topic_candidate_for_later_pending_revision(tmp_path):
     store = _store_with_topic_pair(tmp_path)
     first = store.list_pending_revisions(1)[0]
     analysis = FakeAnalysis()
+    assessor = PeerContradictsAssessor()
 
-    assert run_pending_analysis(store, analysis, FakeSearch(), EmptyFetcher(), 1)["candidates"] == 1
+    assert run_pending_analysis(store, analysis, FakeSearch(), EmptyFetcher(), 1, assessor=assessor)["candidates"] == 1
     assert store.list_pending_revisions() == [item for item in store.list_recent_revisions() if item.id != first.id]
 
-    summary = run_pending_analysis(store, analysis, FakeSearch(), EmptyFetcher(), 1)
+    summary = run_pending_analysis(store, analysis, FakeSearch(), EmptyFetcher(), 1, assessor=assessor)
 
-    assert summary == {"claims": 1, "candidates": 1, "visible_findings": 1, "pending": 0, "retrieval_failures": 0}
+    assert summary == _summary(claims=1, candidates=1, visible_findings=1, analyzed=1)
     assert len(analysis.related[-1]) == 1
+    assert [call[2:] for call in assessor.calls] == [("related_article", "material_cross_media_difference")] * 2
     with sqlite3.connect(store.path) as connection:
         assert connection.execute("SELECT finding_type, visible FROM findings ORDER BY id").fetchall() == [
             ("material_cross_media_difference", 1),
             ("material_cross_media_difference", 1),
         ]
-        rows = connection.execute("SELECT relation, status, source_kind, excerpt FROM evidence ORDER BY id").fetchall()
-    assert [(relation, status, source_kind) for relation, status, source_kind, _ in rows] == [
+        rows = connection.execute("SELECT relation, status, source_kind, excerpt, rationale FROM evidence ORDER BY id").fetchall()
+    assert [row[:3] for row in rows] == [
         ("contradicts", "retrieved", "related_article"),
         ("contradicts", "retrieved", "related_article"),
     ]
-    assert all(len(excerpt) <= 2_000 for _, _, _, excerpt in rows)
+    assert all(len(excerpt) <= 2_000 for _, _, _, excerpt, _ in rows)
+    assert all(rationale == "The peer article reports a different troop count." for *_, rationale in rows)
+
+
+def test_runner_keeps_topic_candidate_pending_without_an_assessor(tmp_path):
+    store = _store_with_topic_pair(tmp_path)
+
+    summary = run_pending_analysis(store, FakeAnalysis(), FakeSearch(), EmptyFetcher(), 10)
+
+    assert summary == _summary(claims=2, candidates=2, pending=2, analyzed=2)
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT finding_type, status, visible FROM findings ORDER BY id").fetchall() == [
+            ("material_cross_media_difference", "pending", 0),
+            ("material_cross_media_difference", "pending", 0),
+        ]
+        rows = connection.execute("SELECT relation, status, source_kind, rationale FROM evidence ORDER BY id").fetchall()
+    assert rows == [("context", "retrieved", "related_article", None)] * 2
+    assert store.list_findings() == []
 
 
 def test_analyze_cli_rejects_unwired_firecrawl_configuration(tmp_path, capsys):
@@ -177,14 +226,43 @@ def test_analyze_cli_prints_only_counts_and_hides_secret_article_text(tmp_path, 
     monkeypatch.setattr(cli, "_store", lambda settings: store)
     monkeypatch.setattr(cli, "build_analysis_provider", lambda settings: FakeAnalysis())
     monkeypatch.setattr(cli, "build_search_provider", lambda settings: FakeSearch())
+    monkeypatch.setattr(cli, "build_evidence_assessor", lambda settings: PeerContradictsAssessor())
     env_file = tmp_path / ".env"
     env_file.write_text("LLM_PROVIDER=gemini\nLLM_MODEL=test\nLLM_API_KEY=super-secret\n", encoding="utf-8")
 
     assert main(["analyze", "--pending", "--env-file", str(env_file)]) == 0
     output = capsys.readouterr().out
-    assert output == "claims=1 candidates=0 visible_findings=0 pending=0 retrieval_failures=0\n"
+    assert output == (
+        "claims=1 candidates=0 visible_findings=0 pending=0 retrieval_failures=0 "
+        "rejected_claims=0 analyzed=1 failed=0 skipped=0\n"
+    )
     assert "Taipei Ministry" not in output
     assert "super-secret" not in output
+
+
+def test_analyze_cli_wires_the_evidence_assessor_and_daily_call_limit(tmp_path, capsys, monkeypatch):
+    import gaohe.cli as cli
+
+    store = _store_with_topic_pair(tmp_path)
+    assessor = PeerContradictsAssessor()
+    monkeypatch.setattr(cli, "_store", lambda settings: store)
+    monkeypatch.setattr(cli, "build_analysis_provider", lambda settings: FakeAnalysis())
+    monkeypatch.setattr(cli, "build_search_provider", lambda settings: FakeSearch())
+    monkeypatch.setattr(cli, "build_evidence_assessor", lambda settings: assessor)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LLM_PROVIDER=gemini\nLLM_MODEL=test\nLLM_API_KEY=super-secret\nDAILY_LLM_CALL_LIMIT=3\n", encoding="utf-8"
+    )
+
+    assert main(["analyze", "--pending", "--env-file", str(env_file)]) == 0
+    # The first revision spends two calls; the second spends the last one on analysis and is
+    # deferred before its assessment.
+    assert capsys.readouterr().out == (
+        "claims=1 candidates=1 visible_findings=1 pending=0 retrieval_failures=0 "
+        "rejected_claims=0 analyzed=1 failed=0 skipped=1\n"
+    )
+    assert len(assessor.calls) == 1
+    assert store.analysis_status(2)["status"] == "skipped"
 
 
 def test_analyze_cli_returns_two_for_storage_error(tmp_path, capsys, monkeypatch):

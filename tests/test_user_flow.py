@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 
 from gaohe.cli import run_pending_analysis
 from gaohe.config import load_settings
@@ -84,8 +85,11 @@ def test_offline_windows_user_flow_keeps_key_local_and_skips_unchanged_content(t
     assert watch_once(settings, store, transport, now=NOW).revisions_created == 1
     assert watch_once(settings, store, transport, now=NOW).revisions_created == 0
 
-    summary = run_pending_analysis(store, FakeAnalysis(), NoSearch(), NoFetcher(), 10)
-    assert summary == {"claims": 1, "candidates": 0, "visible_findings": 0, "pending": 0, "retrieval_failures": 0}
+    summary = run_pending_analysis(store, FakeAnalysis(), NoSearch(), NoFetcher(), 10, now=NOW)
+    assert summary == {
+        "claims": 1, "candidates": 0, "visible_findings": 0, "pending": 0, "retrieval_failures": 0,
+        "rejected_claims": 0, "analyzed": 1, "failed": 0, "skipped": 0,
+    }
     revision = store.list_recent_revisions()[0]
     page = render_status_page({
         "runtime": {"LLM provider": settings.llm_provider},
@@ -94,7 +98,9 @@ def test_offline_windows_user_flow_keeps_key_local_and_skips_unchanged_content(t
         "comparisons": (),
         "sources": ({"name": form["media_name"], "status": "ok", "checked_at": NOW.isoformat(), "candidates_seen": 1},),
     })
-    assert "Inbox" in page and "No visible findings." in page and "Source health" in page
+    for heading in ("新文章收件匣", "發現事項", "來源狀態"):
+        assert re.search(rf"<h2[^>]*>{heading}", page)
+    assert "目前沒有可見的發現事項。" in page
     runtime_page = render_status_page(settings)
     assert revision.text in page
     assert "sample-user-key" not in page
