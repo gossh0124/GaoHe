@@ -385,3 +385,31 @@ def test_serve_keeps_serving_when_store_cannot_initialize(tmp_path, monkeypatch)
     web.serve(env_file=env_file)
 
     assert captured["store"] is not None and server.closed
+
+
+def test_source_not_modified_status_has_a_zh_tw_label():
+    from gaohe.web import render_status_page
+
+    page = render_status_page({"sources": [{"id": 1, "name": "Example", "enabled": True, "status": "not_modified",
+                                            "checked_at": "2026-09-29T00:00:00Z", "candidates_seen": 0, "error": None}]})
+    assert "來源未變更" in page and "狀態不明" not in page
+
+
+def test_start_server_binds_ipv6_loopback_when_available():
+    import socket
+
+    import pytest
+
+    from gaohe.config import Settings
+    from gaohe.web import start_server
+
+    if not socket.has_ipv6:
+        pytest.skip("IPv6 unavailable")
+    try:
+        server = start_server(Settings(), None, "::1", 0)
+    except OSError:
+        pytest.skip("IPv6 loopback not configured on this machine")
+    try:
+        assert server.address_family == socket.AF_INET6
+    finally:
+        server.server_close()

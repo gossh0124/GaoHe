@@ -82,8 +82,8 @@ def test_offline_windows_user_flow_keeps_key_local_and_skips_unchanged_content(t
             "https://example.test/article", b"<main>Local report contains a reported figure.</main>"
         ),
     })
-    assert watch_once(settings, store, transport, now=NOW).revisions_created == 1
-    assert watch_once(settings, store, transport, now=NOW).revisions_created == 0
+    assert watch_once(settings, store, transport, now=NOW, sleep=lambda _seconds: None).revisions_created == 1
+    assert watch_once(settings, store, transport, now=NOW, sleep=lambda _seconds: None).revisions_created == 0
 
     summary = run_pending_analysis(store, FakeAnalysis(), NoSearch(), NoFetcher(), 10, now=NOW)
     assert summary == {

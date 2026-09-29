@@ -150,7 +150,7 @@ def _setup(tmp_path):
     store.initialize()
     store.add_source(Source(None, "甲報", FEED_A))
     store.add_source(Source(None, "乙報", FEED_B))
-    summary = watch_once(settings, store, FakeTransport(), now=NOW)
+    summary = watch_once(settings, store, FakeTransport(), now=NOW, sleep=lambda _seconds: None)
     assert (summary.sources_checked, summary.revisions_created, summary.failures) == (2, 2, 0)
     return env_file, settings, store
 

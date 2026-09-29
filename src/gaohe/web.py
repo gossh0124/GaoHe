@@ -8,6 +8,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import socket
 from pathlib import Path
 import re
 import sqlite3
@@ -59,6 +60,7 @@ ANALYSIS_STATUS_LABELS = {
 SOURCE_STATUS_LABELS = {
     "ok": "正常",
     "failed": "檢查失敗",
+    "not_modified": "來源未變更",
     "not checked": "尚未檢查",
 }
 SOURCE_KIND_LABELS = {
@@ -746,9 +748,14 @@ def _status_handler(settings: Settings, store: Store | None) -> type[LoopbackHan
     return StatusHandler
 
 
+class _IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
 def start_server(settings: Settings, store: Store | None, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTPServer:
     """Create (not start) a loopback server that renders a fresh store snapshot on every GET /."""
-    return ThreadingHTTPServer((host, port), _status_handler(settings, store))
+    server_class = _IPv6ThreadingHTTPServer if ":" in host else ThreadingHTTPServer
+    return server_class((host, port), _status_handler(settings, store))
 
 
 def serve(
