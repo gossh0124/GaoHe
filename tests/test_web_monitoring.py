@@ -45,7 +45,10 @@ def test_article_uses_all_semantic_colors_labels_and_evidence_badges():
         finding("unsupported_inference", 4, 8, "insufficient_scope"),
         finding("factual_contradiction", 6, 8, "retrieved"),
     ))
-    for value in ("mark-factual_contradiction", "mark-material_cross_media_difference", "mark-unsupported_inference", "Factual contradiction", "Material cross-media difference", "Unsupported inference", "Pending check", "Retrieval failed", "Insufficient scope", "Evidence retrieved"):
+    for value in (
+        "mark-factual_contradiction", "mark-material_cross_media_difference", "mark-unsupported_inference",
+        "事實矛盾", "實質跨媒體差異", "推論超出證據", "待查證", "取回失敗", "搜尋範圍不足", "已取得證據",
+    ):
         assert value in article
 
 
@@ -54,8 +57,9 @@ def test_overlap_renders_each_original_character_once_with_all_details():
     parser = _ArticleText()
     parser.feed(article)
     assert "".join(parser.parts) == "abcdef"
-    assert "Factual contradiction: Pending check" in article
-    assert "Unsupported inference: Evidence retrieved" in article
+    assert "事實矛盾：待查證・待人工確認" in article
+    assert "推論超出證據：已取得證據・待人工確認" in article
+    assert "annotation-multi" in article
     assert "badge-pending" in article and "badge-retrieved" in article
 
 
@@ -69,13 +73,16 @@ def test_monitoring_snapshot_escapes_source_errors_and_never_echoes_key():
     })
     assert "&lt;article&gt;" in page and "&lt;summary&gt;" in page and "&lt;comparison&gt;" in page
     assert "do-not-render" not in page and "never-show" not in page
-    assert "sensitive details hidden" in page
+    assert "詳細錯誤已隱藏" in page and "不代表文章有問題" in page
 
 
 def test_evidence_links_are_safe_escaped_and_available_on_articles_and_findings():
     page = render_status_page({
         "inbox": ({"text": "safe", "evidence": {"url": "https://record.example/evidence?a=1&b=2", "title": "<record>", "provider": "<provider>", "retrieved_at": "now"}},),
-        "findings": ({"summary": "safe", "evidence": {"url": "https://record.example/finding", "title": "Finding evidence"}},),
+        "findings": ({
+            "finding_type": "unsupported_inference", "summary": "safe",
+            "evidence": {"url": "https://record.example/finding", "title": "Finding evidence"},
+        },),
         "sources": (), "comparisons": (), "runtime": {},
     })
     assert "https://record.example/evidence?a=1&amp;b=2" in page
@@ -138,6 +145,6 @@ def test_evidence_rejects_double_encoded_sensitive_query_and_fragment():
 
 def test_setup_page_masks_state_and_settings_remain_compatible():
     setup = render_setup_page({"configured": True, "has_llm_key": True, "source_count": 1, "api_key": "secret"})
-    assert "secret" not in setup and "AI key: present" in setup
+    assert "secret" not in setup and "AI 金鑰：已設定" in setup
     status = render_status_page(Settings(llm_api_key="private", data_dir=Path("data")))
-    assert "private" not in status and "GaoHe local monitoring" in status
+    assert "private" not in status and "稿核 GaoHe 本機監測" in status
