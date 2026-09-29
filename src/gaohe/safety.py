@@ -19,6 +19,10 @@ _SENSITIVE_VALUE = re.compile(
     rf"(?i)\b(?:{SENSITIVE_NAME}|(?:access|refresh|client)[_-]?(?:token|secret)|passwd|pwd|session(?:[_-]?id)?)\s*=\s*[^\s,;&]+"
 )
 _BEARER_TOKEN = re.compile(r"(?i)bearer\s+[^\s,;]+")
+# Google's REST APIs accept the key as a bare `key=` query parameter.
+_KEY_PARAMETER = re.compile(r"(?i)([?&#]key=)[^&#\s]*")
+# Google API keys have a fixed, recognizable shape; mask them wherever they appear.
+_GOOGLE_API_KEY = re.compile(r"AIza[0-9A-Za-z_\-]{35}")
 
 
 def is_http_url(value: object) -> bool:
@@ -73,6 +77,8 @@ def redact_text(value: object, limit: int = MAX_EVIDENCE_EXCERPT_CHARS) -> str:
         return ""
     redacted = _SENSITIVE_HEADER.sub("[redacted]", value)
     redacted = _SENSITIVE_QUERY.sub(r"\1[redacted]", redacted)
+    redacted = _KEY_PARAMETER.sub(r"\1[redacted]", redacted)
+    redacted = _GOOGLE_API_KEY.sub("[redacted]", redacted)
     redacted = _SENSITIVE_VALUE.sub(lambda match: match.group(0).split("=", 1)[0] + "=[redacted]", redacted)
     return _BEARER_TOKEN.sub("Bearer [redacted]", redacted)[:limit]
 
@@ -84,12 +90,18 @@ def safe_error(error: str | None) -> str | None:
     return redact_text(error, MAX_ERROR_CHARS)
 
 
+def _is_sensitive_parameter(name: str) -> bool:
+    return name.lower() == "key" or re.search(SENSITIVE_NAME, name, re.IGNORECASE) is not None
+
+
 def redact_url(value: str) -> str:
     """Mask sensitive query/fragment parameters and strip userinfo from a URL."""
     parsed = urlsplit(value)
     query = urlencode([
-        (key, "***" if re.search(SENSITIVE_NAME, key, re.IGNORECASE) else query_value)
+        (key, "***" if _is_sensitive_parameter(key) else _GOOGLE_API_KEY.sub("***", query_value))
         for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
     ])
     fragment = _SENSITIVE_FRAGMENT.sub(r"\1\2***", parsed.fragment)
-    return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, query, fragment))
+    fragment = re.sub(r"(?i)(^|[?&])(key=)[^&#\s]*", r"\1\2***", fragment)
+    path = _GOOGLE_API_KEY.sub("***", parsed.path)
+    return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], path, query, fragment))
