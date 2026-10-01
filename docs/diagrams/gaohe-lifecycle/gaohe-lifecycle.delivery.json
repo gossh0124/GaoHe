@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "ad46c1f2-e280-47f7-bd55-7b3ddbd9eaf7",
+  "status": "current",
+  "command": "deliver",
+  "type": "lifecycle",
+  "input": "/home/user/GaoHe/docs/diagrams/gaohe-lifecycle/candidate.json",
+  "output": "/home/user/GaoHe/docs/diagrams/gaohe-lifecycle/gaohe-lifecycle.html",
+  "specification": {
+    "sha256": "34d3126a96b3995365fc31cc31a1d62035d0aee8650fee3153d0ed9dd27e6c43",
+    "bytes": 30843
+  },
+  "artifact": {
+    "sha256": "3fb9fb8968292ca30d31282d08a3a90827f1f4c3862b27149fd79add36b091db",
+    "bytes": 765621
+  }
+}

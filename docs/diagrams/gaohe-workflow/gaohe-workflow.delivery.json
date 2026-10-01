@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "b603ea84-0322-47f8-890a-196cac801393",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "/home/user/GaoHe/docs/diagrams/gaohe-workflow/candidate.json",
+  "output": "/home/user/GaoHe/docs/diagrams/gaohe-workflow/gaohe-workflow.html",
+  "specification": {
+    "sha256": "67b4c79bc1cbdee8a448d9b6ecee41defc98db0e3c876c33deb52254895e4a0b",
+    "bytes": 34315
+  },
+  "artifact": {
+    "sha256": "6a8f25eed0ffb682877e198e28ff666257758a8b14280235c5d682121fd44ced",
+    "bytes": 774716
+  }
+}

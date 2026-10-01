@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "workflow",
+  "quality": "showcase",
+  "specification": {
+    "path": "/home/user/GaoHe/docs/diagrams/gaohe-workflow/candidate.json",
+    "sha256": "67b4c79bc1cbdee8a448d9b6ecee41defc98db0e3c876c33deb52254895e4a0b",
+    "bytes": 34315
+  },
+  "artifact": {
+    "path": "/home/user/GaoHe/docs/diagrams/gaohe-workflow/gaohe-workflow.html",
+    "sha256": "6a8f25eed0ffb682877e198e28ff666257758a8b14280235c5d682121fd44ced",
+    "bytes": 774716
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/home/user/GaoHe/docs/diagrams/gaohe-workflow/review-2/gaohe-workflow.finalize.json",
+    "summaryReceipt": "/home/user/GaoHe/docs/diagrams/gaohe-workflow/review-2/gaohe-workflow.finalize-summary.json",
+    "browserCheckReceipt": "/home/user/GaoHe/docs/diagrams/gaohe-workflow/review-2/gaohe-workflow.browser-check.json"
+  },
+  "update": {
+    "status": "unavailable",
+    "installedVersion": null,
+    "availableVersion": null,
+    "releaseNotes": null,
+    "checkedAt": null,
+    "source": null,
+    "noticeRequired": false,
+    "noticeText": null,
+    "reason": "cache-valid"
+  },
+  "visualReview": "not-requested",
+  "durationMs": 4683,
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "routesOverSuggestedBends": 3
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [],
+      "detours": [
+        {
+          "relationship": {
+            "id": "assess-visible",
+            "from": "assess",
+            "to": "visible",
+            "label": "關係＋理由",
+            "collectionIndex": 0,
+            "artifactIndex": 1
+          },
+          "bends": 3,
+          "stretch": 1.168
+        },
+        {
+          "relationship": {
+            "id": "evidence-assess",
+            "from": "evidence",
+            "to": "assess",
+            "label": "全文摘錄",
+            "collectionIndex": 1,
+            "artifactIndex": 2
+          },
+          "bends": 4,
+          "stretch": 1.074
+        },
+        {
+          "relationship": {
+            "id": "start-watch",
+            "from": "start",
+            "to": "watch",
+            "label": "啟動",
+            "collectionIndex": 9,
+            "artifactIndex": 10
+          },
+          "bends": 3,
+          "stretch": 1.177
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "assess → visible needs 3 bends: move node assess or visible so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "evidence → assess needs 4 bends: move node evidence or assess so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "start → watch needs 3 bends: move node start or watch so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}
