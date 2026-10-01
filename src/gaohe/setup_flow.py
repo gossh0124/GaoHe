@@ -17,7 +17,7 @@ from .config import Settings
 from .domain import Source
 from .safety import is_source_url as _is_source_url
 from .storage import Store
-from .web import NOT_FOUND_PAGE, LoopbackHandler
+from .web import MISDIRECTED_PAGE, NOT_FOUND_PAGE, LoopbackHandler
 
 
 @dataclass(frozen=True)
@@ -52,7 +52,9 @@ _STATE_UNAVAILABLE = "目前無法讀取本機資料，請關閉這個分頁後�
 
 
 def _has_control(value: str) -> bool:
-    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+    # str.splitlines() (used to read .env) also breaks on U+2028, U+0085 and friends,
+    # so anything non-printable could smuggle an extra setting into the file.
+    return any(not character.isprintable() for character in value)
 
 
 def validate_setup_form(form: Mapping[str, str]) -> list[str]:
@@ -156,8 +158,7 @@ def _message(text: str) -> str:
 
 _DISCLOSURE = (
     "<section aria-labelledby='disclosure'><h2 id='disclosure'>外部傳送告知</h2><ul>"
-    "<li>分析時，文章內容可能會送到你選擇的 AI 服務供應商（目前是 Gemini）。</li>"
-    "<li>若另外啟用 Firecrawl，網址或頁面內容可能會送到 Firecrawl；它是外部服務，可能有額度、速率限制、登入牆或付費牆等限制。</li>"
+    "<li>分析時，文章內容與查核問題會送到 Gemini；找證據時 Gemini 會使用 Google 搜尋。</li>"
     "<li>稿核不會繞過登入、付費牆、CAPTCHA 或網站安全控制。</li>"
     "<li>API 金鑰只寫入這台電腦的 <code>.env</code>，不會寫入資料庫，也不會顯示在頁面或錯誤訊息中。</li>"
     "</ul></section>"
@@ -165,9 +166,9 @@ _DISCLOSURE = (
 _FORM_FIELDS = (
     "<label>AI 服務供應商 <span class='hint'>Gemini（目前唯一支援）</span>"
     "<input name='provider' value='gemini' readonly aria-readonly='true' required></label>"
-    "<label>AI 模型 <span class='hint'>例如 gemini-2.5-flash-lite</span>"
-    "<input name='model' required autocomplete='off'></label>"
-    "<label>Gemini API 金鑰 <span class='hint'>請使用你自己的金鑰</span>"
+    "<label>AI 模型 <span class='hint'>不確定就用預設值</span>"
+    "<input name='model' value='gemini-2.5-flash' required autocomplete='off'></label>"
+    "<label>Gemini API 金鑰 <span class='hint'>只會保存在這台電腦</span>"
     "<input name='api_key' type='password' required autocomplete='off'></label>"
     "<label>媒體名稱 <input name='media_name' required></label>"
     "<label>RSS 或新聞列表網址 <input name='source_url' type='url' required></label>"
@@ -179,8 +180,7 @@ def _page(state: SetupState, errors: tuple[str, ...] = (), complete: bool = Fals
     if complete:
         return _document("稿核設定完成", (
             "<h1>稿核已完成設定</h1><p>你的本機設定與媒體來源已儲存，可以關閉這個分頁。</p>"
-            "<p>之後可以用 <code>gaohe watch --once</code> 立即檢查來源，"
-            "或用 <code>gaohe serve</code> 開啟本機監測頁。</p>"
+            "<p>排程會定期檢查來源；查核結果會顯示在稿核的本機頁面。</p>"
         ))
     messages = "".join(f"<li>{escape(message)}</li>" for message in errors)
     error_html = f"<section role='alert'><h2>請檢查以下欄位</h2><ul>{messages}</ul></section>" if messages else ""
@@ -189,8 +189,7 @@ def _page(state: SetupState, errors: tuple[str, ...] = (), complete: bool = Fals
     if form_token:
         token_html = f"<input type='hidden' name='{_FORM_TOKEN_FIELD}' value='{escape(form_token, quote=True)}'>"
     byok = (
-        "<p>每位下載稿核的人都要輸入自己的 Gemini API 金鑰（自備金鑰）。這個專案不提供共用的雲端帳號；"
-        "Gemini 的額度、使用條款與速率限制都屬於你自己的帳號。其他 AI 服務供應商將在未來版本支援。</p>"
+        "<p>請貼上 Gemini API 金鑰。金鑰的額度與使用條款屬於提供金鑰的帳號。</p>"
     )
     return _document("稿核設定", (
         f"<h1>在這台電腦設定稿核</h1>{byok}"
@@ -229,14 +228,13 @@ def _handler(settings: Settings, store: Store, env_path: Path):
 
     class SetupHandler(LoopbackHandler):
         content_security_policy = SETUP_PAGE_CSP
-        allowed_methods = ("GET", "HEAD", "POST")
 
         def _reply(self, status: int, page: str, head_only: bool = False) -> None:
             self.send_page(status, page, head_only=head_only)
 
         def _show_form(self, head_only: bool) -> None:
             if not self.host_allowed():
-                self.reject_host(head_only)
+                self.send_page(HTTPStatus.MISDIRECTED_REQUEST, MISDIRECTED_PAGE, head_only=head_only)
                 return
             if self.path != "/":
                 self._reply(HTTPStatus.NOT_FOUND, NOT_FOUND_PAGE, head_only)
@@ -254,11 +252,9 @@ def _handler(settings: Settings, store: Store, env_path: Path):
         def do_HEAD(self) -> None:
             self._show_form(head_only=True)
 
-        do_PUT = do_DELETE = do_PATCH = do_OPTIONS = LoopbackHandler.method_not_allowed
-
         def do_POST(self) -> None:
             if not self.host_allowed():
-                self.reject_host()
+                self.send_page(HTTPStatus.MISDIRECTED_REQUEST, MISDIRECTED_PAGE)
                 return
             if self.path != "/":
                 self._reply(HTTPStatus.NOT_FOUND, NOT_FOUND_PAGE)
@@ -301,8 +297,10 @@ def run_setup_wizard(settings: Settings, store: Store, open_browser: bool = True
     """Run a one-shot loopback setup page until a valid local form is submitted."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(settings, store, env_path))
     try:
+        url = f"http://127.0.0.1:{server.server_port}/"
+        print(f"設定頁面：{url}", flush=True)
         if open_browser:
-            webbrowser.open(f"http://127.0.0.1:{server.server_port}/")
+            webbrowser.open(url)
         server.serve_forever()
     finally:
         server.server_close()

@@ -1,216 +1,110 @@
-from dataclasses import replace
-from pathlib import Path
 import sqlite3
 
 import pytest
 
-from gaohe.domain import ArticleCandidate, FetchedArticle, RunSummary, Source, article_content_hash
-from gaohe.storage import Store
+from gaohe.domain import ArticleCandidate, Claim, Evidence, FetchedArticle, Finding, RunSummary, Source, article_content_hash
+from gaohe.storage import IncompatibleDatabase, MANUAL_SOURCE_FEED_URL, SCHEMA_VERSION, Store
+
+T0, T1, T2 = "2026-10-01T00:00:00Z", "2026-10-01T01:00:00Z", "2026-10-01T02:00:00Z"
 
 
-def candidate(source_id: int, url: str = "https://example.test/articles/one") -> ArticleCandidate:
-    return ArticleCandidate(
-        source_id=source_id,
-        url=url,
-        title="Example article",
-        published_at="2026-09-18T01:00:00Z",
-        discovered_at="2026-09-18T02:00:00Z",
-        metadata={"category": "news"},
-    )
+def candidate(source_id, url="https://news.example/a?token=SECRET", title="標題", published="2026-10-01T08:00:00+08:00", at=T0):
+    return ArticleCandidate(source_id, url, title, published, at, {"discovery_type": "rss"})
 
 
-def fetched(item: ArticleCandidate, text: str = "First body") -> FetchedArticle:
-    return FetchedArticle(
-        candidate=item,
-        text=text,
-        fetched_at="2026-09-18T03:00:00Z",
-        content_hash=article_content_hash(item.title, text),
-    )
+def fetched(source_id, text="第一版內文", at=T0, **kwargs):
+    item = candidate(source_id, at=at, **kwargs)
+    return FetchedArticle(item, text, at, article_content_hash(item.title, text))
 
 
-def test_initialize_creates_all_monitoring_tables(tmp_path: Path):
-    database = tmp_path / "monitoring.db"
-    Store(database).initialize()
-
-    with sqlite3.connect(database) as connection:
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-
-    assert {"sources", "source_checks", "articles", "article_revisions", "runs"} <= tables
-
-
-def test_source_is_upserted_by_feed_url_and_can_be_filtered(tmp_path: Path):
-    store = Store(tmp_path / "monitoring.db")
+def test_initialize_creates_one_schema_is_idempotent_and_refuses_foreign_databases(tmp_path):
+    store = Store(tmp_path / "gaohe.db")
     store.initialize()
-
-    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
-    same_id = store.add_source(Source(None, "Updated", "https://example.test/feed", enabled=False))
-
-    assert same_id == source_id
-    assert store.list_sources() == [Source(source_id, "Updated", "https://example.test/feed", None, False)]
-    assert store.list_sources(enabled_only=True) == []
-
-
-def test_first_fetched_article_creates_a_revision(tmp_path: Path):
-    store = Store(tmp_path / "monitoring.db")
     store.initialize()
-    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
-
-    revision_id, created = store.save_fetched_article(fetched(candidate(source_id)))
-
-    assert revision_id > 0
-    assert created is True
-    assert store.latest_content_hash("https://example.test/articles/one") == article_content_hash("Example article", "First body")
-
-
-def test_unchanged_fetched_article_reuses_its_current_revision(tmp_path: Path):
-    store = Store(tmp_path / "monitoring.db")
-    store.initialize()
-    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
-    item = candidate(source_id)
-
-    first_id, _ = store.save_fetched_article(fetched(item))
-    duplicate_id, created = store.save_fetched_article(fetched(item))
-
-    assert duplicate_id == first_id
-    assert created is False
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    legacy = tmp_path / "old.db"
+    with sqlite3.connect(legacy) as connection:
+        connection.execute("CREATE TABLE sources (id INTEGER PRIMARY KEY)")
+    with pytest.raises(IncompatibleDatabase) as error:
+        Store(legacy).initialize()
+    assert "gaohe.db" in str(error.value)
 
 
-def test_unchanged_content_updates_article_metadata_without_a_revision(tmp_path: Path):
-    store = Store(tmp_path / "monitoring.db")
-    store.initialize()
-    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
-    item = candidate(source_id)
-
-    first_id, _ = store.save_fetched_article(fetched(item))
-    duplicate_id, created = store.save_fetched_article(fetched(replace(item, metadata={"marker": "v2"})))
-
-    assert duplicate_id == first_id
-    assert created is False
-    assert store.latest_article_metadata(item.url) == {"marker": "v2"}
+def test_sources_and_the_manual_source(store):
+    feed_id = store.add_source(Source(None, "甲報", "https://a.example/rss"))
+    manual_id = store.ensure_manual_source()
+    assert store.ensure_manual_source() == manual_id
+    assert [s.id for s in store.list_sources()] == [feed_id]
+    manual = store.list_sources(include_manual=True)[-1]
+    assert (manual.kind, manual.enabled, manual.feed_url) == ("manual", False, MANUAL_SOURCE_FEED_URL)
+    assert not store.set_source_enabled(manual_id, True)  # the manual source is never polled
+    assert store.set_source_enabled(feed_id, False) and store.list_sources(enabled_only=True) == []
 
 
-def test_changed_fetched_article_creates_a_new_revision(tmp_path: Path):
-    store = Store(tmp_path / "monitoring.db")
-    store.initialize()
-    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
-    item = candidate(source_id)
-
-    first_id, _ = store.save_fetched_article(fetched(item))
-    changed_id, created = store.save_fetched_article(fetched(item, "Changed body"))
-
-    assert changed_id > first_id
-    assert created is True
-    assert store.latest_content_hash(item.url) == article_content_hash(item.title, "Changed body")
-
-
-def test_reverted_content_creates_a_new_current_revision(tmp_path: Path):
-    store = Store(tmp_path / "monitoring.db")
-    store.initialize()
-    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
-    item = candidate(source_id)
-
-    first_id, _ = store.save_fetched_article(fetched(item, "A"))
-    second_id, _ = store.save_fetched_article(fetched(item, "B"))
-    third_id, created = store.save_fetched_article(fetched(item, "A"))
-
-    with sqlite3.connect(tmp_path / "monitoring.db") as connection:
-        revisions = connection.execute(
-            "SELECT content_hash FROM article_revisions ORDER BY id"
-        ).fetchall()
-
-    assert [first_id, second_id, third_id] == sorted([first_id, second_id, third_id])
-    assert created is True
-    assert revisions == [
-        (article_content_hash(item.title, "A"),),
-        (article_content_hash(item.title, "B"),),
-        (article_content_hash(item.title, "A"),),
-    ]
-    assert store.latest_content_hash(item.url) == article_content_hash(item.title, "A")
+def test_revisions_only_on_content_change_and_first_seen_facts_are_kept(store):
+    first = store.add_source(Source(None, "甲報", "https://a.example/rss"))
+    second = store.add_source(Source(None, "乙報", "https://b.example/rss"))
+    revision_id, created = store.save_fetched_article(fetched(first))
+    assert created
+    assert store.save_fetched_article(fetched(second, at=T1, published=None)) == (revision_id, False)
+    state = store.article_state("https://news.example/a?token=SECRET")
+    assert state["last_fetched_at"] == T1 and state["discovered_at"] == T0
+    assert state["published_at"] == T0  # +08:00 normalized to UTC and not erased by a later None
+    new_id, created = store.save_fetched_article(fetched(second, "第二版內文", at=T2))
+    assert created and new_id != revision_id
+    assert [r.id for r in store.list_pending_revisions()] == [new_id]  # only the current revision is pending
 
 
-def test_foreign_keys_reject_unknown_source_and_keep_store_empty(tmp_path: Path):
-    store = Store(tmp_path / "monitoring.db")
-    store.initialize()
-
-    with pytest.raises(sqlite3.IntegrityError):
-        store.save_fetched_article(fetched(candidate(999)))
-
-    assert store.latest_content_hash("https://example.test/articles/one") is None
-
-
-def test_failed_write_rolls_back_without_leaving_a_source(tmp_path: Path):
-    store = Store(tmp_path / "monitoring.db")
-    store.initialize()
-
-    with pytest.raises(sqlite3.IntegrityError):
-        store.add_source(Source(None, None, "https://example.test/bad"))  # type: ignore[arg-type]
-
-    assert store.list_sources() == []
+def test_failed_jobs_retry_up_to_max_attempts_and_reset_allows_an_explicit_recheck(store):
+    source = store.add_source(Source(None, "甲報", "https://a.example/rss"))
+    revision_id, _ = store.save_fetched_article(fetched(source))
+    for _ in range(3):
+        store.mark_analysis_failed(revision_id, T1, "error with key=AIza" + "x" * 35)
+    assert store.list_pending_revisions(max_attempts=3) == []
+    status = store.analysis_status(revision_id)
+    assert status["attempts"] == 3 and "AIza" not in status["last_error"]
+    store.reset_analysis(revision_id)
+    assert [r.id for r in store.list_pending_revisions(revision_ids=[revision_id])] == [revision_id]
+    assert store.list_pending_revisions(revision_ids=[]) == []
 
 
-def test_source_checks_and_runs_persist_bounded_safe_error_text(tmp_path: Path):
-    store = Store(tmp_path / "monitoring.db")
-    store.initialize()
-    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
-
-    store.record_source_check(
-        source_id,
-        "2026-09-18T04:00:00Z",
-        "failed",
-        0,
-        "Authorization: Bearer secret-value " + "x" * 600,
-    )
-    run_id = store.record_run(RunSummary("2026-09-18T04:00:00Z", None, 1, 0, 0, 1))
-
-    with sqlite3.connect(tmp_path / "monitoring.db") as connection:
-        error = connection.execute("SELECT error FROM source_checks").fetchone()[0]
-
-    assert run_id > 0
-    assert "secret-value" not in error
-    assert len(error) <= 500
+def _analysis(store, revision_id):
+    text = "第一版內文"
+    claim = Claim(None, revision_id, text[0:3], 0, 3, "checkable", "material")
+    visible = Finding(None, revision_id, "factual_contradiction", "說法不同", 0, 3, "retrieved", True)
+    pending = Finding(None, revision_id, "unsupported_inference", "待查", 3, 5, "pending", False)
+    proof = Evidence("https://gov.example/a?session=S1", "公告", "內文片段", "contradicts", "retrieved", T1, "search", "日期不同")
+    lead = Evidence("https://lead.example/x", "lead", "should not be stored", "context", "retrieval_failed", None)
+    return store.save_analysis(revision_id, [claim], [visible, pending], [[proof, lead], []], completed_at=T1, model="m", prompt_version="v")
 
 
-def test_source_check_errors_redact_cookie_token_and_query_secrets(tmp_path: Path):
-    store = Store(tmp_path / "monitoring.db")
-    store.initialize()
-    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
-
-    store.record_source_check(
-        source_id,
-        "2026-09-18T04:00:00Z",
-        "failed",
-        0,
-        "Cookie: session=private-cookie\nX-Token: private-token\n"
-        "GET https://example.test/feed?access_token=query-token&client_secret=query-secret&password=query-password&kind=article",
-    )
-    store.record_source_check(source_id, "2026-09-18T05:00:00Z", "failed", 0, "Connection timed out after 5 seconds")
-
-    with sqlite3.connect(tmp_path / "monitoring.db") as connection:
-        errors = [row[0] for row in connection.execute("SELECT error FROM source_checks ORDER BY id")]
-
-    assert all(value not in errors[0] for value in ["private-cookie", "private-token", "query-token", "query-secret", "query-password", "session="])
-    assert "kind=article" in errors[0]
-    assert errors[1] == "Connection timed out after 5 seconds"
+def test_save_analysis_is_atomic_and_a_second_run_cannot_duplicate_results(store):
+    source = store.add_source(Source(None, "甲報", "https://a.example/rss"))
+    revision_id, _ = store.save_fetched_article(fetched(source))
+    assert _analysis(store, revision_id) is True
+    assert _analysis(store, revision_id) is False
+    assert store.finding_counts(revision_id) == (1, 1)
+    assert store.analysis_status(revision_id)["status"] == "completed"
+    store.mark_analysis_failed(revision_id, T2, "late failure")  # never downgrades a completed job
+    assert store.analysis_status(revision_id)["status"] == "completed"
+    with pytest.raises(ValueError):
+        store.save_analysis(revision_id + 99, [], [], [], completed_at=T1)
 
 
-def test_source_check_errors_redact_generic_sensitive_headers_and_query_keys(tmp_path: Path):
-    store = Store(tmp_path / "monitoring.db")
-    store.initialize()
-    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
-
-    store.record_source_check(
-        source_id,
-        "2026-09-18T06:00:00Z",
-        "failed",
-        0,
-        "Token: private-token\nSecret: private-secret\nPassword: private-password\nSession: private-session\n"
-        "GET https://example.test/feed?authorization=private-auth&cookie=private-cookie&kind=article",
-    )
-
-    with sqlite3.connect(tmp_path / "monitoring.db") as connection:
-        error = connection.execute("SELECT error FROM source_checks").fetchone()[0]
-
-    assert all(value not in error for value in ["private-token", "private-secret", "private-password", "private-session", "private-auth", "private-cookie"])
-    assert "authorization=[redacted]" in error
-    assert "cookie=[redacted]" in error
-    assert "kind=article" in error
+def test_dashboard_snapshot_shows_current_articles_visible_findings_and_redacts_urls(store):
+    source = store.add_source(Source(None, "甲報", "https://a.example/rss"))
+    revision_id, _ = store.save_fetched_article(fetched(source))
+    _analysis(store, revision_id)
+    store.record_source_check(source, T1, "failed", 3, "HTTP 500 for https://a.example/rss?api_key=K")
+    store.record_run(RunSummary(T0, T1, 1, 3, 1, 1))
+    snapshot = store.dashboard_snapshot()
+    [item] = snapshot["inbox"]
+    assert item["url"] == "https://news.example/a?token=%2A%2A%2A" and item["analysis_status"] == "completed"
+    assert [f.finding_type for f in item["annotations"]] == ["factual_contradiction"] and item["pending_findings"] == 1
+    assert [e["url"] for e in item["evidence"]] == ["https://gov.example/a?session=%2A%2A%2A", "https://lead.example/x"]
+    assert item["evidence"][1]["excerpt"] == ""  # a failed lead never keeps text
+    assert [f["summary"] for f in snapshot["findings"]] == ["說法不同"]
+    assert snapshot["sources"][0]["status"] == "failed" and "K" not in snapshot["sources"][0]["error"].split("api_key=")[1]
+    assert snapshot["last_run"]["revisions_created"] == 1

@@ -5,15 +5,11 @@ import unicodedata
 
 CLAIM_KINDS = frozenset({"checkable", "descriptive", "attributed_statement", "inference", "opinion"})
 CLAIM_MATERIALITIES = frozenset({"ordinary", "material"})
-CLAIM_EXTRACTION_STATUSES = frozenset({"extracted", "rejected"})
-MAX_QUERY_CHARS = 500
-MAX_SEARCH_LIMIT = 10
-# Machine-side lifecycle of one revision's analysis job.
-ANALYSIS_STATUSES = frozenset({"pending", "running", "completed", "failed", "skipped"})
-# Human review of a finding; independent from the machine-side finding status.
-REVIEW_STATUSES = frozenset({"unreviewed", "confirmed", "dismissed"})
+# The only annotation types that can ever become visible (spec 7.3, without the cross-media type).
+FINDING_TYPES = frozenset({"factual_contradiction", "unsupported_inference"})
 # What an evidence assessor may conclude about one retrieved page.
 ASSESSMENT_RELATIONS = frozenset({"supports", "contradicts", "context", "irrelevant"})
+MAX_QUERY_CHARS = 500
 
 
 @dataclass(frozen=True)
@@ -23,7 +19,7 @@ class Source:
     feed_url: str
     article_url: str | None = None
     enabled: bool = True
-    kind: str = "feed"
+    kind: str = "feed"  # "feed" is polled; "manual" owns single articles checked on demand
 
 
 @dataclass(frozen=True)
@@ -42,7 +38,6 @@ class FetchedArticle:
     text: str
     fetched_at: str
     content_hash: str
-    fetch_status: str = "ok"
 
 
 @dataclass(frozen=True)
@@ -65,16 +60,33 @@ class Claim:
     end: int
     kind: str
     materiality: str
-    extraction_status: str
+
+
+@dataclass(frozen=True)
+class FindingCandidate:
+    finding_type: str
+    summary: str
+    start: int
+    end: int
+    query: str | None
+    revision_id: int
+
+
+@dataclass(frozen=True)
+class AnalysisResult:
+    revision_id: int
+    claims: tuple[Claim, ...]
+    candidates: tuple[FindingCandidate, ...]
+    rejected_claims: int = 0
 
 
 @dataclass(frozen=True)
 class SearchHit:
+    """A search lead: where to look, never evidence by itself."""
+
     url: str
     title: str
-    snippet: str
     source: str
-    published_at: str | None
 
 
 @dataclass(frozen=True)
@@ -83,26 +95,20 @@ class RetrievedPage:
     title: str
     text: str
     retrieved_at: str
-    status: str
+    status: str  # "retrieved" or a failure reason
     content_hash: str | None
-    fetched_via: str = "direct"
 
 
 @dataclass(frozen=True)
 class Evidence:
-    id: int | None
-    finding_id: int | None
     url: str
     title: str
     excerpt: str
-    relation: str
-    status: str
-    source_kind: str
+    relation: str  # supports | contradicts | context
+    status: str  # retrieved | retrieval_failed | insufficient_scope
     retrieved_at: str | None
     provider: str | None = None
-    published_at: str | None = None
-    content_hash: str | None = None
-    rationale: str | None = None
+    rationale: str | None = None  # set only by an assessor
 
 
 @dataclass(frozen=True)
@@ -118,61 +124,27 @@ class EvidenceAssessment:
 class Finding:
     id: int | None
     revision_id: int
-    claim_id: int | None
     finding_type: str
     summary: str
     start: int
     end: int
-    status: str
     evidence_status: str
     visible: bool
-    review_status: str = "unreviewed"
-
-
-@dataclass(frozen=True)
-class FindingCandidate:
-    claim_id: int | None
-    finding_type: str
-    summary: str
-    start: int
-    end: int
-    materiality: str
-    query: str | None
-    revision_id: int | None = None
-
-
-@dataclass(frozen=True)
-class AnalysisResult:
-    revision_id: int
-    claims: tuple[Claim, ...]
-    candidates: tuple[FindingCandidate, ...]
-    evidence: tuple[Evidence, ...] = ()
-    findings: tuple[Finding, ...] = ()
-    rejected_claims: int = 0
-
-
-@dataclass(frozen=True)
-class TopicGroup:
-    id: int | None
-    label: str
-    confidence: str
-    status: str
 
 
 @dataclass(frozen=True)
 class CheckOutcome:
     """Result of checking one user-supplied article URL on demand (never an article verdict)."""
 
-    status: str  # completed | failed | skipped | invalid_url | fetch_failed
+    status: str  # completed | failed | invalid_url | fetch_failed
     message: str  # plain zh-TW explanation of what happened and what to do next
     revision_id: int | None = None
-    article_id: int | None = None
 
 
 @dataclass(frozen=True)
 class RunSummary:
     started_at: str
-    finished_at: str | None
+    finished_at: str
     sources_checked: int
     candidates_seen: int
     revisions_created: int
@@ -190,5 +162,4 @@ def normalize_article_content(title: str, text: str) -> tuple[str, str]:
 def article_content_hash(title: str, text: str) -> str:
     """Return the SHA-256 for NFC, LF-normalized title and article text."""
     normalized_title, normalized_text = normalize_article_content(title, text)
-    normalized = f"{normalized_title}\n{normalized_text}"
-    return sha256(normalized.encode("utf-8")).hexdigest()
+    return sha256(f"{normalized_title}\n{normalized_text}".encode("utf-8")).hexdigest()

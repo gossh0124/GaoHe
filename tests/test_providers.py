@@ -1,295 +1,206 @@
-from dataclasses import dataclass
+import io
+import json
+from urllib.error import HTTPError, URLError
 
 import pytest
 
+from conftest import ARTICLE_TEXT, FakeGemini, FakeTransport, gemini_text, html_response, revision
 from gaohe.config import Settings
-from gaohe.domain import ArticleRevision, RetrievedPage, article_content_hash
+from gaohe.domain import Evidence, FindingCandidate
+from gaohe.errors import ProviderError
+from gaohe.providers import (
+    MAX_RETRIES,
+    DirectPageFetcher,
+    GeminiAnalysisProvider,
+    GeminiClient,
+    GeminiEvidenceAssessor,
+    GeminiSearchProvider,
+    NullSearchProvider,
+    build_search_provider,
+    contains_quote,
+    locate_quote,
+    response_text,
+)
 from gaohe.sources import HttpResponse
 
-
-def revision() -> ArticleRevision:
-    text = "A checkable statement."
-    return ArticleRevision(1, 1, "https://news.test/article", "Article", text, article_content_hash("Article", text), "2026-09-18T00:00:00Z")
+SETTINGS = Settings(llm_provider="gemini", llm_model="gemini-2.5-flash", llm_api_key="AIza-test-key")
 
 
-@dataclass
-class FakeTransport:
-    response: HttpResponse | Exception
-    calls: int = 0
-
-    def fetch(self, _url: str, timeout_seconds: float = 20.0) -> HttpResponse:
-        self.calls += 1
-        if isinstance(self.response, Exception):
-            raise self.response
-        return self.response
+def http_error(code, body=b"{}", headers=None):
+    return HTTPError("https://x.test", code, "error", headers or {}, io.BytesIO(body))
 
 
-def test_null_search_and_unsupported_selection_are_network_free():
-    from gaohe.providers import NullSearchProvider, build_analysis_provider, build_search_provider
+# --- quote anchoring --------------------------------------------------------------------------
 
-    assert NullSearchProvider().search("anything") == ()
-    assert build_search_provider(Settings(llm_provider="gemini", llm_model="gemini", llm_api_key="key")).search("anything") == ()
-    with pytest.raises(ValueError, match="Unsupported WEB_SEARCH_PROVIDER: example"):
-        build_search_provider(Settings(web_search_provider="example"))
-    with pytest.raises(ValueError, match="Unsupported LLM_PROVIDER: example"):
-        build_analysis_provider(Settings(llm_provider="example"))
-
-
-def test_gemini_adapter_parses_strict_valid_json_and_redacts_failures():
-    from gaohe.providers import GeminiAnalysisProvider
-
-    response = '{"claims":[{"text":"A checkable statement.","start":0,"end":22,"kind":"checkable","materiality":"ordinary"}],"candidates":[{"claim_id":null,"finding_type":"factual_contradiction","summary":"Needs checking","start":0,"end":22,"materiality":"material","query":"source query"}]}'
-    provider = GeminiAnalysisProvider(Settings(llm_provider="gemini", llm_model="gemini-test", llm_api_key="super-secret"), request=lambda *_args: response)
-
-    result = provider.analyze(revision(), ())
-
-    assert result.revision_id == 1
-    assert result.claims[0].text == "A checkable statement."
-    assert result.candidates[0].query == "source query"
-    bad = GeminiAnalysisProvider(Settings(llm_provider="gemini", llm_model="gemini", llm_api_key="super-secret"), request=lambda *_args: "not json")
-    with pytest.raises(ValueError, match="Gemini returned invalid analysis response") as error:
-        bad.analyze(revision(), ())
-    assert "super-secret" not in str(error.value)
+def test_locate_quote_exact_whitespace_insensitive_and_occurrence():
+    text = "近 500 位民眾到場。主辦單位說近500位。"
+    start = text.index("主辦單位說")
+    assert locate_quote(text, "主辦單位說") == (start, start + 5)
+    assert locate_quote("近 500 位民眾", "近500位") == (0, 7)  # span covers the original spacing
+    assert locate_quote("甲乙甲乙", "甲乙") is None  # ambiguous without occurrence
+    assert locate_quote("甲乙甲乙", "甲乙", 2) == (2, 4)
+    assert locate_quote("甲乙甲乙", "甲乙", 3) is None
+    assert locate_quote("abc", "  ") is None and locate_quote("abc", "zzz") is None
 
 
-def test_gemini_request_asks_for_verbatim_quotes_with_structured_output_and_no_retrieval():
-    from gaohe.providers import GeminiAnalysisProvider
-
-    captured = []
-    provider = GeminiAnalysisProvider(
-        Settings(llm_provider="gemini", llm_model="gemini", llm_api_key="secret"),
-        request=lambda _model, payload, _key: captured.append(payload) or '{"claims":[],"candidates":[]}',
-    )
-
-    provider.analyze(revision(), ())
-
-    payload = captured[0]
-    instructions = payload["systemInstruction"]["parts"][0]["text"]
-    assert "verbatim" in instructions
-    assert "Do not search, browse, retrieve evidence" in instructions
-    assert "unit, time, entity, and approximation" in instructions
-    assert "近500位" in instructions and "約500人" in instructions
-    assert "Opinions and descriptions are never material" in instructions
-    for finding_type in ("factual_contradiction", "material_cross_media_difference", "unsupported_inference"):
-        assert finding_type in instructions
-    assert "untrusted data" in instructions
-    schema = payload["generationConfig"]["responseSchema"]
-    assert schema["properties"]["claims"]["items"]["required"] == ["quote", "kind", "materiality"]
-    assert schema["properties"]["candidates"]["items"]["required"] == ["claim_index", "finding_type", "summary", "materiality"]
-    assert "start" not in schema["properties"]["claims"]["items"]["properties"]
+def test_contains_quote_ignores_whitespace_but_needs_content():
+    assert contains_quote("官員 表示 增加三成", "官員表示")
+    assert not contains_quote("官員表示", "") and not contains_quote("官員表示", "減少")
 
 
-@pytest.mark.parametrize("response", ["{}", '{"claims":"bad","candidates":[]}'])
-def test_gemini_adapter_rejects_invalid_shapes(response: str):
-    from gaohe.providers import GeminiAnalysisProvider
+# --- client: retry, classification, no leaks --------------------------------------------------
 
-    provider = GeminiAnalysisProvider(Settings(llm_provider="gemini", llm_model="gemini", llm_api_key="secret"), request=lambda *_args: response)
-    with pytest.raises(ValueError, match="Gemini returned invalid analysis response"):
-        provider.analyze(revision(), ())
+def test_client_retries_rate_limit_using_retry_info_then_succeeds():
+    sleeps, attempts = [], []
 
+    def request(model, payload, key):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise http_error(429, b'{"error":{"details":[{"retryDelay":"7s"}]}}')
+        return {"ok": True}
 
-def test_gemini_adapter_normalizes_provider_failure_without_secret_leakage():
-    from gaohe.providers import GeminiAnalysisProvider
-
-    def failed_request(*_args):
-        raise RuntimeError("Authorization: Bearer super-secret")
-
-    provider = GeminiAnalysisProvider(Settings(llm_provider="gemini", llm_model="gemini", llm_api_key="super-secret"), request=failed_request)
-    with pytest.raises(ValueError, match="Gemini analysis request failed") as error:
-        provider.analyze(revision(), ())
-    assert "super-secret" not in str(error.value)
+    client = GeminiClient(SETTINGS, request, sleep=sleeps.append)
+    assert client.generate({}) == {"ok": True}
+    assert sleeps == [7.0] and client.requests_sent == 2
 
 
-def test_gemini_post_keeps_key_out_of_url_headers_and_public_error():
-    from gaohe.providers import GeminiAnalysisProvider
+@pytest.mark.parametrize("error, code", [
+    (http_error(400, b'{"error":{"details":[{"reason":"API_KEY_INVALID"}]}}'), "auth"),
+    (http_error(403), "auth"),
+    (http_error(404), "model_not_found"),
+    (http_error(400), "invalid_response"),
+    (http_error(503), "unavailable"),
+    (URLError(TimeoutError()), "timeout"),
+    (URLError("dns"), "network"),
+    (ConnectionResetError(), "network"),
+])
+def test_client_classifies_failures_and_never_chains_the_original(error, code):
+    sleeps = []
+    client = GeminiClient(SETTINGS, FakeGemini(error=error), sleep=sleeps.append)
+    with pytest.raises(ProviderError) as raised:
+        client.generate({})
+    assert raised.value.code == code
+    assert raised.value.__context__ is None and raised.value.__cause__ is None
+    retried = code in ("unavailable", "timeout", "network")
+    assert len(sleeps) == (MAX_RETRIES if retried else 0)
 
-    class Response:
+
+def test_client_requires_model_and_key():
+    with pytest.raises(ProviderError) as raised:
+        GeminiClient(Settings(llm_provider="gemini"), FakeGemini()).generate({})
+    assert raised.value.code == "config"
+
+
+def test_real_post_sends_key_only_in_header():
+    seen = {}
+
+    class Response(io.BytesIO):
         def __enter__(self):
             return self
 
-        def __exit__(self, *_args):
+        def __exit__(self, *exc):
             return False
 
-        def read(self, _limit):
-            raise RuntimeError("https://example.test/?key=super-secret")
+    def fake_urlopen(request, timeout):
+        seen.update(url=request.full_url, headers=dict(request.header_items()), body=request.data, timeout=timeout)
+        return Response(json.dumps({"candidates": []}).encode())
 
-    captured = []
+    GeminiClient(SETTINGS, urlopen_request=fake_urlopen).generate({"contents": []})
+    assert "AIza-test-key" not in seen["url"] and b"AIza-test-key" not in seen["body"]
+    assert seen["headers"]["X-goog-api-key"] == "AIza-test-key"
+    assert seen["url"].endswith("/models/gemini-2.5-flash:generateContent")
 
-    def fake_urlopen(request, *, timeout):
-        captured.append((request.full_url, dict(request.header_items()), timeout))
-        return Response()
 
-    provider = GeminiAnalysisProvider(
-        Settings(llm_provider="gemini", llm_model="gemini-test", llm_api_key="super-secret"),
-        urlopen_request=fake_urlopen,
+@pytest.mark.parametrize("value, code", [
+    ({"promptFeedback": {"blockReason": "SAFETY"}}, "blocked"),
+    ({"candidates": [{"finishReason": "SAFETY", "content": {"parts": []}}]}, "blocked"),
+    ({"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": []}}]}, "invalid_response"),
+    ({}, "invalid_response"),
+])
+def test_response_text_reports_blocked_and_empty_answers(value, code):
+    with pytest.raises(ProviderError) as raised:
+        response_text(value)
+    assert raised.value.code == code
+
+
+# --- analysis -------------------------------------------------------------------------------
+
+def test_analysis_anchors_quotes_drops_unusable_claims_and_gates_candidates():
+    gemini = FakeGemini(analysis={
+        "claims": [
+            {"quote": "開放外籍旅客入境觀光", "kind": "checkable", "materiality": "material"},
+            {"quote": "政策將使觀光收入增加三成", "kind": "inference", "materiality": "material"},
+            {"quote": "不存在的句子", "kind": "checkable", "materiality": "material"},
+            {"quote": "行政院今天宣布", "kind": "descriptive", "materiality": "ordinary"},
+            {"quote": "開放外籍旅客入境觀光", "kind": "checkable", "materiality": "material"},  # duplicate span
+        ],
+        "candidates": [
+            {"claim_index": 0, "finding_type": "factual_contradiction", "summary": "確認開放日期", "query": "開放 外籍旅客 入境"},
+            {"claim_index": 1, "finding_type": "unsupported_inference", "summary": "收入增幅缺乏依據"},
+            {"claim_index": 2, "finding_type": "factual_contradiction", "summary": "dropped claim"},
+            {"claim_index": 3, "finding_type": "factual_contradiction", "summary": "descriptive claim"},
+            {"claim_index": 0, "finding_type": "material_cross_media_difference", "summary": "removed type"},
+        ],
+    })
+    result = GeminiAnalysisProvider(SETTINGS, gemini).analyze(revision())
+    assert [ARTICLE_TEXT[c.start:c.end] for c in result.claims] == ["開放外籍旅客入境觀光", "政策將使觀光收入增加三成", "行政院今天宣布"]
+    assert result.rejected_claims == 2
+    assert [(c.finding_type, c.query) for c in result.candidates] == [
+        ("factual_contradiction", "開放 外籍旅客 入境"), ("unsupported_inference", None),
+    ]
+    assert gemini.calls[0][0] == "analysis"
+
+
+def test_analysis_rejects_a_malformed_top_level_response():
+    gemini = lambda model, payload, key: gemini_text({"claims": "nope"})  # noqa: E731
+    with pytest.raises(ProviderError):
+        GeminiAnalysisProvider(SETTINGS, gemini).analyze(revision())
+
+
+# --- assessment and search --------------------------------------------------------------------
+
+def test_assessor_sends_context_around_the_anchored_span():
+    text = "背景。" * 400 + "官員表示增加三成。" + "後記。" * 400
+    start = text.index("官員")
+    captured = {}
+
+    def assessment(payload):
+        captured.update(json.loads(payload["contents"][0]["parts"][0]["text"]))
+        return {"evidence_quote": "增加一成", "rationale": "官方數字不同", "relation": "contradicts"}
+
+    candidate = FindingCandidate("factual_contradiction", "收入", start, start + 8, None, 1)
+    evidence = Evidence("https://gov.example/a", "官方", "預估增加一成", "context", "retrieved", None)
+    result = GeminiEvidenceAssessor(SETTINGS, FakeGemini(assessment=assessment)).assess(
+        candidate, "官員表示增加三成", revision(text), evidence
     )
-    with pytest.raises(ValueError, match="Gemini analysis request failed") as error:
-        provider.analyze(revision(), ())
-
-    url, headers, timeout = captured[0]
-    assert "super-secret" not in url
-    assert "?key=" not in url
-    assert headers["X-goog-api-key"] == "super-secret"
-    assert timeout == 60
-    assert error.value.__context__ is None
-    assert "super-secret" not in str(error.value)
-    assert error.value.__cause__ is None
+    assert result.relation == "contradicts" and "官員表示增加三成" in captured["article"]["context"]
 
 
-def test_gemini_adapter_bounds_candidate_query():
-    from gaohe.providers import GeminiAnalysisProvider, MAX_QUERY_CHARS
-
-    response = ('{"claims":[],"candidates":[{"claim_id":null,"finding_type":"factual_contradiction",'
-                '"summary":"Needs checking","start":0,"end":1,"materiality":"material","query":"' + "q" * (MAX_QUERY_CHARS + 1) + '"}]}')
-    provider = GeminiAnalysisProvider(Settings(llm_provider="gemini", llm_model="gemini", llm_api_key="secret"), request=lambda *_args: response)
-
-    assert len(provider.analyze(revision(), ()).candidates[0].query) == MAX_QUERY_CHARS
+def test_search_returns_grounding_sources_as_leads_and_honours_limit():
+    gemini = FakeGemini(search_uris=["https://a.example/1", "https://a.example/1", "ftp://x", "https://b.example/2", "https://c.example/3"])
+    hits = GeminiSearchProvider(SETTINGS, gemini).search("開放 入境", limit=2)
+    assert [hit.url for hit in hits] == ["https://a.example/1", "https://b.example/2"]
+    assert gemini.calls[0][3]["tools"] == [{"google_search": {}}]
 
 
-def test_direct_page_fetcher_extracts_text_hash_and_uses_no_fallback_on_success():
-    from gaohe.providers import DirectPageFetcher
-
-    direct = FakeTransport(HttpResponse(200, "https://evidence.test/article", {"Content-Type": "text/html"}, b"<title>Evidence</title><main><p>Useful text</p></main>"))
-    def fallback(_url):
-        pytest.fail("fallback must not run")
-
-    page = DirectPageFetcher(direct, fallback=fallback, firecrawl_api_key="key").fetch("https://evidence.test/article")
-
-    assert (page.status, page.title, page.text, page.content_hash) == ("retrieved", "Evidence", "Useful text", article_content_hash("Evidence", "Useful text"))
-    assert direct.calls == 1
+def test_build_search_provider_follows_settings():
+    assert isinstance(build_search_provider(SETTINGS), GeminiSearchProvider)
+    assert isinstance(build_search_provider(Settings(web_search_provider="none")), NullSearchProvider)
 
 
-@pytest.mark.parametrize(
-    ("url", "response", "status"),
-    [
-        ("ftp://evidence.test/article", HttpResponse(200, "", {}, b""), "invalid_url"),
-        ("https://evidence.test/article", HttpResponse(404, "https://evidence.test/article", {}, b""), "http_error"),
-        ("https://evidence.test/article", TimeoutError("Bearer secret"), "timeout"),
-        ("https://evidence.test/article", HttpResponse(200, "https://evidence.test/article", {"Content-Type": "text/html"}, b"x" * 1_000_001), "oversized"),
-    ],
-)
-def test_direct_page_fetcher_normalizes_failures(url, response, status):
-    from gaohe.providers import DirectPageFetcher
+# --- page fetching ----------------------------------------------------------------------------
 
-    page = DirectPageFetcher(FakeTransport(response)).fetch(url)
-
-    assert page.status == status
-    assert page.text == ""
-    assert page.content_hash is None
+def test_direct_fetcher_extracts_text_and_follows_the_final_url():
+    response = html_response("https://final.example/story", "標題", "第一段", "第二段")
+    page = DirectPageFetcher(FakeTransport({"https://lead.example/x": response})).fetch("https://lead.example/x")
+    assert (page.status, page.url, page.title, page.text) == ("retrieved", "https://final.example/story", "標題", "第一段\n第二段")
 
 
-def test_direct_fetcher_uses_injected_firecrawl_fallback_only_with_key():
-    from gaohe.providers import DirectPageFetcher
-
-    calls: list[str] = []
-
-    def fallback(url: str):
-        calls.append(url)
-        return ("Fallback", "Fallback text")
-
-    failed = FakeTransport(HttpResponse(503, "https://evidence.test/article", {}, b""))
-    without_key = DirectPageFetcher(failed, fallback=fallback).fetch("https://evidence.test/article")
-    assert without_key.status == "http_error"
-    assert calls == []
-
-    with_key = DirectPageFetcher(failed, fallback=fallback, firecrawl_api_key="secret").fetch("https://evidence.test/article")
-    assert (with_key.status, with_key.title, with_key.text) == ("retrieved", "Fallback", "Fallback text")
-    assert calls == ["https://evidence.test/article"]
-
-
-def test_direct_fetcher_normalizes_fallback_page_and_recomputes_hash():
-    from gaohe.providers import DirectPageFetcher, MAX_PAGE_TEXT_CHARS, MAX_PAGE_TITLE_CHARS
-
-    def fallback(_url):
-        return RetrievedPage(
-            "https://fallback.test/article",
-            "T" * (MAX_PAGE_TITLE_CHARS + 1),
-            "X" * (MAX_PAGE_TEXT_CHARS + 1),
-            "2000-01-01T00:00:00Z",
-            "retrieved",
-            "forged-hash",
-        )
-    page = DirectPageFetcher(FakeTransport(HttpResponse(503, "https://evidence.test/article", {}, b"")), fallback=fallback, firecrawl_api_key="secret").fetch("https://evidence.test/article")
-
-    assert (page.status, len(page.title), len(page.text)) == ("retrieved", MAX_PAGE_TITLE_CHARS, MAX_PAGE_TEXT_CHARS)
-    assert page.content_hash == article_content_hash(page.title, page.text)
-    assert page.content_hash != "forged-hash"
-
-
-@pytest.mark.parametrize(
-    "fallback",
-    [
-        lambda _url: RetrievedPage("ftp://fallback.test/article", "Title", "Text", "", "retrieved", None),
-        lambda _url: ("Title", ""),
-        lambda _url: ("", "body"),
-        lambda _url: (" \t", "body"),
-    ],
-)
-def test_direct_fetcher_rejects_invalid_or_incomplete_fallback_page(fallback):
-    from gaohe.providers import DirectPageFetcher
-
-    page = DirectPageFetcher(FakeTransport(HttpResponse(503, "https://evidence.test/article", {}, b"")), fallback=fallback, firecrawl_api_key="secret").fetch("https://evidence.test/article")
-
-    assert (page.status, page.content_hash) == ("http_error", None)
-
-
-@pytest.mark.parametrize("result", ["not a tuple", ("title",), ("title", None)])
-def test_firecrawl_fetcher_maps_malformed_output_to_safe_status(result):
-    from gaohe.providers import FirecrawlPageFetcher
-
-    page = FirecrawlPageFetcher("secret", lambda *_args: result).fetch("https://evidence.test/article")
-
-    assert (page.status, page.text, page.content_hash) == ("retrieval_failed", "", None)
-
-
-def test_provider_matrix_runs_with_null_search_and_fake_analysis_without_network():
-    from gaohe.providers import AnalysisResult, NullSearchProvider
-
-    class FakeAnalysis:
-        def analyze(self, item, related):
-            assert item == revision()
-            assert related == ()
-            return AnalysisResult(item.id, (), ())
-
-    assert NullSearchProvider().search("bounded query", limit=999) == ()
-    assert FakeAnalysis().analyze(revision(), ()).revision_id == 1
-
-
-@pytest.mark.parametrize("limit", [0, -1, True])
-def test_null_search_rejects_non_positive_limits(limit):
-    from gaohe.providers import NullSearchProvider
-
-    with pytest.raises(ValueError, match="Search limit"):
-        NullSearchProvider().search("bounded query", limit=limit)
-
-
-def test_direct_page_fetcher_marks_direct_and_fallback_pages_with_how_they_were_fetched():
-    from gaohe.providers import DirectPageFetcher
-
-    body = b"<title>E</title><main><p>Direct text</p></main>"
-    direct = FakeTransport(HttpResponse(200, "https://evidence.test/article", {"Content-Type": "text/html"}, body))
-    failing = FakeTransport(HttpResponse(503, "https://evidence.test/article", {}, b""))
-
-    assert DirectPageFetcher(direct).fetch("https://evidence.test/article").fetched_via == "direct"
-    fallback = DirectPageFetcher(failing, fallback=lambda _url: ("Fallback", "Fallback text"), firecrawl_api_key="secret")
-    assert fallback.fetch("https://evidence.test/article").fetched_via == "firecrawl"
-
-
-def test_fallback_page_object_is_marked_firecrawl_even_if_it_claims_direct():
-    from gaohe.providers import DirectPageFetcher
-
-    def fallback(_url):
-        return RetrievedPage("https://fallback.test/article", "Title", "Text", "", "retrieved", None, fetched_via="direct")
-
-    fetcher = DirectPageFetcher(FakeTransport(TimeoutError()), fallback=fallback, firecrawl_api_key="secret")
-    page = fetcher.fetch("https://evidence.test/article")
-
-    assert (page.status, page.fetched_via) == ("retrieved", "firecrawl")
-
-
-def test_firecrawl_fetcher_marks_pages_as_firecrawl():
-    from gaohe.providers import FirecrawlPageFetcher
-
-    page = FirecrawlPageFetcher("secret", lambda *_args: ("Title", "Scraped text")).fetch("https://evidence.test/article")
-
-    assert (page.status, page.fetched_via) == ("retrieved", "firecrawl")
+@pytest.mark.parametrize("page, status", [
+    (HttpResponse(500, "https://x.test/", {}, b""), "http_error"),
+    (HttpResponse(200, "https://x.test/", {"Content-Type": "text/html"}, b"<html></html>"), "parse_error"),
+    (TimeoutError(), "timeout"),
+    (OSError("refused"), "retrieval_failed"),
+])
+def test_direct_fetcher_failures_are_statuses_not_exceptions(page, status):
+    assert DirectPageFetcher(FakeTransport({"https://x.test/": page})).fetch("https://x.test/").status == status

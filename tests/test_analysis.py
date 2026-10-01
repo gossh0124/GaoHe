@@ -1,316 +1,137 @@
-from dataclasses import dataclass
-
 import pytest
 
-from gaohe.domain import ArticleRevision, Claim, article_content_hash
-from gaohe.providers import AnalysisResult, FindingCandidate
+from conftest import FakeGemini, FakeTransport, html_response, revision
+from gaohe.analysis import MIN_EVIDENCE_QUOTE_CHARS, analyze_revision, assess_evidence, is_visible, retrieve_evidence
+from gaohe.config import Settings
+from gaohe.domain import Evidence, EvidenceAssessment, FindingCandidate, SearchHit
+from gaohe.providers import DirectPageFetcher, GeminiAnalysisProvider, GeminiEvidenceAssessor, GeminiSearchProvider
 
+SETTINGS = Settings(llm_provider="gemini", llm_model="m", llm_api_key="k")
+CANDIDATE = FindingCandidate("factual_contradiction", "確認開放日期", 9, 19, "外籍旅客 入境 開放日期", 1)
 
-def revision(text: str) -> ArticleRevision:
-    return ArticleRevision(7, 3, "https://news.test/article", "Article", text, article_content_hash("Article", text), "2026-09-20T00:00:00Z")
 
+class Search:
+    def __init__(self, *urls):
+        self.urls, self.queries = urls, []
 
-def claim(item: ArticleRevision, text: str, kind: str = "checkable", materiality: str = "material", *, claim_id: int | None = None) -> Claim:
-    start = item.text.index(text)
-    return Claim(claim_id, item.id, text, start, start + len(text), kind, materiality, "extracted")
+    def search(self, query, limit=5):
+        self.queries.append(query)
+        return [SearchHit(url, "lead title", "test-search") for url in self.urls]
 
 
-def candidate(item: ArticleRevision, text: str, finding_type: str = "factual_contradiction", materiality: str = "material", *, claim_id: int | None = None, summary: str = "Conflicts with the cited record") -> FindingCandidate:
-    start = item.text.index(text)
-    return FindingCandidate(claim_id, finding_type, summary, start, start + len(text), materiality, None)
+def evidence(url="https://gov.example/a", relation="contradicts", rationale="官方公告日期不同", status="retrieved", excerpt="公告：十二月起開放"):
+    return Evidence(url, "官方", excerpt, relation, status, "2026-10-01T00:00:00Z", rationale=rationale)
 
 
-@dataclass
-class FakeAnalysisProvider:
-    result: AnalysisResult
-    calls: int = 0
+# --- retrieval ---------------------------------------------------------------------------------
 
-    def analyze(self, item: ArticleRevision, related: tuple[ArticleRevision, ...]) -> AnalysisResult:
-        assert related == ()
-        self.calls += 1
-        return self.result
-
-
-def test_extract_claims_keeps_nearly_500_officials_as_background_without_candidate():
-    from gaohe.analysis import extract_claims
-
-    item = revision("邀集近 500 位國內外官員與專家。")
-    ordinary = claim(item, "邀集近 500 位國內外官員與專家", kind="descriptive", materiality="ordinary")
-    provider = FakeAnalysisProvider(AnalysisResult(item.id, (ordinary,), (candidate(item, ordinary.text),)))
-
-    result = extract_claims(item, provider)
-
-    assert provider.calls == 1
-    assert result.claims == (ordinary,)
-    assert result.candidates == ()
-
-
-def test_extract_claims_keeps_an_explicit_material_candidate_pending_without_visible_output():
-    from gaohe.analysis import extract_claims
-
-    item = revision("該計畫在 2026 年提供 1,000 萬元補助。")
-    stated = claim(item, "該計畫在 2026 年提供 1,000 萬元補助")
-    valid = candidate(item, stated.text)
-    provider = FakeAnalysisProvider(AnalysisResult(item.id, (stated,), (valid,)))
-
-    result = extract_claims(item, provider)
-
-    assert result.candidates == (valid,)
-    assert result.findings == ()
-    assert result.evidence == ()
-
-
-def test_extract_claims_drops_duplicate_valid_claim_spans_before_persistence():
-    from gaohe.analysis import extract_claims
-
-    item = revision("The verified wording.")
-    duplicate = (
-        claim(item, "The verified wording", claim_id=11),
-        claim(item, "The verified wording", claim_id=12),
-    )
-
-    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, duplicate, ())))
-
-    assert result.claims == (duplicate[0],)
-    assert result.rejected_claims == 1
-
-
-@pytest.mark.parametrize("kind", ["checkable", "descriptive", "attributed_statement", "inference", "opinion"])
-def test_extract_claims_accepts_each_store_persistable_claim_kind(kind):
-    from gaohe.analysis import extract_claims
-
-    item = revision("The verified wording.")
-    stated = claim(item, "The verified wording", kind=kind, materiality="ordinary")
-
-    assert extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), ()))).claims == (stated,)
-
-
-@pytest.mark.parametrize(
-    ("kind", "materiality", "extraction_status"),
-    [("unsupported", "ordinary", "extracted"), ("checkable", "unsupported", "extracted"), ("checkable", "ordinary", "unsupported")],
-)
-def test_extract_claims_drops_unbounded_claim_fields(kind, materiality, extraction_status):
-    from gaohe.analysis import extract_claims
-
-    item = revision("The verified wording.")
-    stated = Claim(None, item.id, "The verified wording", 0, len("The verified wording"), kind, materiality, extraction_status)
-
-    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), ())))
-
-    assert result.claims == ()
-    assert result.rejected_claims == 1
-
-
-@pytest.mark.parametrize(
-    ("kind", "materiality", "finding_type", "expected"),
-    [
-        ("attributed_statement", "ordinary", "factual_contradiction", False),
-        ("attributed_statement", "material", "factual_contradiction", True),
-        ("inference", "material", "unsupported_inference", True),
-        ("opinion", "ordinary", "unsupported_inference", False),
-        ("descriptive", "ordinary", "material_cross_media_difference", False),
-    ],
-)
-def test_material_gate_distinguishes_attribution_inference_opinion_and_description(kind, materiality, finding_type, expected):
-    from gaohe.analysis import is_material_candidate
-
-    item = revision("Minister says the policy will work.")
-    stated = claim(item, "Minister says the policy will work", kind, materiality)
-
-    assert is_material_candidate(stated, candidate(item, stated.text, finding_type), item) is expected
-
-
-def test_extract_claims_rejects_invalid_candidate_shapes_but_keeps_valid_claims():
-    from gaohe.analysis import extract_claims
-
-    item = revision("The record says 100 units.")
-    stated = claim(item, "The record says 100 units")
-    invalid = (
-        FindingCandidate(None, "factual_contradiction", "Bad span", 0, 1, "material", None),
-        FindingCandidate(None, "factual_contradiction", "   ", stated.start, stated.end, "material", None),
-        FindingCandidate(None, "opinion", "Wrong type", stated.start, stated.end, "material", None),
-        FindingCandidate(None, "factual_contradiction", "No claim", 4, 10, "material", None),
-    )
-
-    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), invalid)))
-
-    assert result.claims == (stated,)
-    assert result.candidates == ()
-
-
-@pytest.mark.parametrize(
-    "value",
-    ["factual_contradiction", "material_cross_media_difference", "unsupported_inference"],
-)
-def test_allowed_finding_type_has_an_exact_allowlist(value):
-    from gaohe.analysis import allowed_finding_type
-
-    assert allowed_finding_type(value) is True
-
-
-@pytest.mark.parametrize("value", ["Factual_contradiction", "opinion", "", " factual_contradiction", None])
-def test_allowed_finding_type_rejects_everything_else(value):
-    from gaohe.analysis import allowed_finding_type
-
-    assert allowed_finding_type(value) is False
-
-
-def test_extract_claims_rejects_revision_mismatch_but_drops_claim_text_mismatch():
-    from gaohe.analysis import extract_claims
-
-    item = revision("The verified wording.")
-    mismatch = Claim(None, item.id, "Different wording", 0, len("The verified wording"), "checkable", "material", "extracted")
-    tied = FindingCandidate(None, "factual_contradiction", "Check", 0, len("The verified wording"), "material", None)
-
-    with pytest.raises(ValueError, match="revision_id"):
-        extract_claims(item, FakeAnalysisProvider(AnalysisResult(8, (), ())))
-    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (mismatch,), (tied,))))
-    assert result.claims == ()
-    assert result.candidates == ()
-    assert result.rejected_claims == 1
-
-
-def test_tone_only_ordinary_proposal_stays_pre_evidence_and_has_no_visible_output():
-    from gaohe.analysis import extract_claims, is_material_candidate
-
-    item = revision("The verified wording.")
-    stated = claim(item, "The verified wording", materiality="ordinary", claim_id=11)
-    mismatched_id = candidate(item, stated.text, claim_id=12)
-    keyword_only = FindingCandidate(None, "factual_contradiction", "Suspicious tone", 0, len("The verified wording"), "material", None)
-
-    assert is_material_candidate(stated, mismatched_id, item) is False
-    assert is_material_candidate(stated, keyword_only, item) is False
-    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), (keyword_only,))))
-    assert result.candidates == ()
-    assert result.findings == ()
-    assert result.evidence == ()
-
-
-def test_approximate_450_500_520_claims_remain_background_until_task_4_or_5_resolution():
-    from gaohe.analysis import extract_claims
-
-    item = revision("邀集約 450、近 500 或約 520 位官員與專家。")
-    ordinary = claim(item, "邀集約 450、近 500 或約 520 位官員與專家", kind="descriptive", materiality="ordinary")
-
-    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (ordinary,), (candidate(item, ordinary.text),))))
-
-    # Semantic comparison needs Task 4 evidence or Task 5 verified topic peers.
-    assert result.claims == (ordinary,)
-    assert result.candidates == ()
-
-
-def test_extract_claims_keeps_the_first_of_duplicate_spans_and_drops_candidates_tied_to_the_duplicate():
-    from gaohe.analysis import extract_claims
-
-    item = revision("The verified wording.")
-    first = claim(item, "The verified wording", claim_id=11)
-    duplicate = claim(item, "The verified wording", claim_id=12)
-    to_first = candidate(item, first.text, claim_id=11)
-    to_duplicate = candidate(item, first.text, claim_id=12)
-
-    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (first, duplicate), (to_first, to_duplicate))))
-
-    assert result.claims == (first,)
-    assert result.candidates == (to_first,)
-    assert result.rejected_claims == 1
-
-
-def test_extract_claims_drops_bad_claims_and_their_candidates_and_counts_every_rejection():
-    from gaohe.analysis import extract_claims
-
-    item = revision("部長表示補助 1,000 萬元。報告指出共 30 所學校受惠。")
-    kept = claim(item, "部長表示補助 1,000 萬元", kind="attributed_statement")
-    other = claim(item, "報告指出共 30 所學校受惠")
-    bad_span = Claim(None, item.id, "報告指出共 30 所學校受惠", 0, 5, "checkable", "material", "extracted")
-    bad_kind = Claim(None, item.id, other.text, other.start, other.end, "rumour", "material", "extracted")
-    wrong_revision = Claim(None, 99, other.text, other.start, other.end, "checkable", "material", "extracted")
-    duplicate = claim(item, kept.text)
-    whitespace = Claim(None, item.id, " ", item.text.index(" "), item.text.index(" ") + 1, "checkable", "material", "extracted")
-    not_a_claim = "not a claim"
-    kept_candidate = candidate(item, kept.text)
-    orphan_candidate = FindingCandidate(None, "factual_contradiction", "Tied to a dropped span", 0, 5, "material", None)
-    provider = FakeAnalysisProvider(AnalysisResult(
-        item.id,
-        (kept, bad_span, bad_kind, wrong_revision, duplicate, whitespace, not_a_claim),
-        (kept_candidate, orphan_candidate),
-        rejected_claims=2,
-    ))
-
-    result = extract_claims(item, provider)
-
-    assert result.claims == (kept,)
-    assert result.candidates == (kept_candidate,)
-    # Two rejected by the provider while anchoring, six more by validation.
-    assert result.rejected_claims == 8
-    assert result.evidence == ()
-    assert result.findings == ()
-
-
-def test_extract_claims_counts_zero_rejections_for_a_clean_result():
-    from gaohe.analysis import extract_claims
-
-    item = revision("The verified wording.")
-    stated = claim(item, "The verified wording")
-
-    assert extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), ()))).rejected_claims == 0
-
-
-@pytest.mark.parametrize("reported", [-3, True, "2", None])
-def test_extract_claims_ignores_nonsense_provider_rejection_counts(reported):
-    from gaohe.analysis import extract_claims
-
-    item = revision("The verified wording.")
-    stated = claim(item, "The verified wording")
-    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), (), rejected_claims=reported)))
-
-    assert result.rejected_claims == 0
-
-
-def test_extract_claims_still_raises_for_non_normalized_revision_text():
-    from gaohe.analysis import extract_claims
-
-    item = ArticleRevision(7, 3, "https://news.test/article", "Article", "Line one.\r\nLine two.", "hash", "2026-09-20T00:00:00Z")
-    provider = FakeAnalysisProvider(AnalysisResult(item.id, (), ()))
-
-    with pytest.raises(ValueError, match="normalized"):
-        extract_claims(item, provider)
-    assert provider.calls == 0
-
-
-def test_extract_claims_drops_candidates_that_are_not_finding_candidates():
-    from gaohe.analysis import extract_claims
-
-    item = revision("The verified wording.")
-    stated = claim(item, "The verified wording")
-
-    result = extract_claims(item, FakeAnalysisProvider(AnalysisResult(item.id, (stated,), ("junk", None))))
-
-    assert result.claims == (stated,)
-    assert result.candidates == ()
-
-
-def test_extract_claims_anchors_a_whole_gemini_response_and_drops_only_the_unlocatable_claim():
-    from gaohe.analysis import extract_claims
-    from gaohe.config import Settings
-    from gaohe.providers import GeminiAnalysisProvider
-
-    item = revision("邀集近 500 位\n國內外官員。部長表示補助 1,000 萬元。")
-    response = (
-        '{"claims":['
-        '{"quote":"邀集近 500 位 國內外官員","kind":"descriptive","materiality":"ordinary"},'
-        '{"quote":"部長表示補助 1,000 萬元","kind":"attributed_statement","materiality":"material"},'
-        '{"quote":"部長表示補助 2,000 萬元","kind":"attributed_statement","materiality":"material"}],'
-        '"candidates":['
-        '{"claim_index":1,"finding_type":"factual_contradiction","summary":"核對補助金額","materiality":"material"},'
-        '{"claim_index":2,"finding_type":"factual_contradiction","summary":"Dropped claim","materiality":"material"}]}'
-    )
-    provider = GeminiAnalysisProvider(Settings(llm_provider="gemini", llm_model="m", llm_api_key="k"), request=lambda *_args: response)
-
-    result = extract_claims(item, provider)
-
-    assert [value.text for value in result.claims] == ["邀集近 500 位\n國內外官員", "部長表示補助 1,000 萬元"]
-    assert all(item.text[value.start:value.end] == value.text for value in result.claims)
-    assert [(value.summary, value.start, value.end) for value in result.candidates] == [
-        ("核對補助金額", result.claims[1].start, result.claims[1].end),
+def test_retrieve_fetches_full_text_and_a_failed_lead_is_never_evidence():
+    fetcher = DirectPageFetcher(FakeTransport({
+        "https://gov.example/a": html_response("https://gov.example/a", "公告", "十二月起開放入境"),
+        "https://blocked.example/b": OSError("refused"),
+    }))
+    items = retrieve_evidence(CANDIDATE, revision(), Search("https://gov.example/a", "https://blocked.example/b"), fetcher)
+    assert [(item.url, item.status, item.excerpt) for item in items] == [
+        ("https://gov.example/a", "retrieved", "十二月起開放入境"),
+        ("https://blocked.example/b", "retrieval_failed", ""),  # the lead's title/snippet never becomes excerpt
     ]
-    assert result.rejected_claims == 1
+    assert all(item.rationale is None for item in items)
+
+
+@pytest.mark.parametrize("query", ["api_key=abc 開放", "行政院今天宣布", ""])
+def test_retrieve_never_sends_secrets_or_the_article_itself(query):
+    search = Search("https://gov.example/a")
+    candidate = FindingCandidate("factual_contradiction", query or " ", 0, 5, query or None, 1)
+    assert retrieve_evidence(candidate, revision(), search, DirectPageFetcher(FakeTransport({}))) == []
+    assert search.queries == []
+
+
+# --- assessment --------------------------------------------------------------------------------
+
+class Assessor:
+    def __init__(self, answer):
+        self.answer = answer
+
+    def assess(self, candidate, claim_text, revision, evidence):
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+@pytest.mark.parametrize("answer, relation, rationale, status", [
+    (EvidenceAssessment("contradicts", "日期不同", "十二月起開放"), "contradicts", "日期不同", "retrieved"),
+    (EvidenceAssessment("contradicts", "日期不同", "十月起開放"), "context", None, "retrieved"),  # quote not in excerpt
+    (EvidenceAssessment("contradicts", "日期不同", "開放"), "context", None, "retrieved"),  # too short to ground anything
+    (EvidenceAssessment("contradicts", "  ", "十二月起開放"), "context", None, "retrieved"),  # no rationale
+    (EvidenceAssessment("irrelevant", "無關", ""), "context", "無關", "insufficient_scope"),
+    (ValueError("boom"), "context", None, "retrieved"),
+])
+def test_assessment_is_applied_only_when_it_holds_up(answer, relation, rationale, status):
+    item = evidence(relation="context", rationale=None, excerpt="公告：自十二月起開放外籍旅客")
+    [result] = assess_evidence(CANDIDATE, "下月起開放", revision(), [item], Assessor(answer))
+    assert (result.relation, result.rationale, result.status) == (relation, rationale, status)
+    assert MIN_EVIDENCE_QUOTE_CHARS > len("開放")
+
+
+def test_failed_evidence_is_never_sent_to_the_assessor():
+    failed = evidence(status="retrieval_failed", excerpt="", rationale=None, relation="context")
+    assert assess_evidence(CANDIDATE, "x", revision(), [failed], Assessor(ValueError())) == [failed]
+
+
+# --- visibility policy -------------------------------------------------------------------------
+
+def test_factual_contradiction_needs_assessed_full_text_and_no_support():
+    assert is_visible("factual_contradiction", [evidence()])
+    assert not is_visible("factual_contradiction", [evidence(rationale=None)])
+    assert not is_visible("factual_contradiction", [evidence(status="retrieval_failed")])
+    assert not is_visible("factual_contradiction", [evidence(excerpt="")])
+    assert not is_visible("factual_contradiction", [evidence(url="ftp://x/a")])
+    assert not is_visible("factual_contradiction", [evidence(), evidence("https://b.example/", relation="supports")])
+    assert not is_visible("factual_contradiction", [])
+
+
+def test_unsupported_inference_needs_two_independent_sites_and_no_support():
+    one = evidence("https://a.example/1", relation="context")
+    same_site = evidence("https://a.example/2", relation="context")
+    other_site = evidence("https://b.example/1", relation="context")
+    assert not is_visible("unsupported_inference", [one])
+    assert not is_visible("unsupported_inference", [one, same_site])
+    assert is_visible("unsupported_inference", [one, other_site])
+    assert not is_visible("unsupported_inference", [one, other_site, evidence("https://c.example/", relation="supports")])
+    assert not is_visible("material_cross_media_difference", [one, other_site])
+
+
+# --- one revision end to end -------------------------------------------------------------------
+
+def test_analyze_revision_produces_one_visible_contradiction_and_one_pending_inference():
+    gemini = FakeGemini(
+        analysis={
+            "claims": [
+                {"quote": "開放外籍旅客入境觀光", "kind": "checkable", "materiality": "material"},
+                {"quote": "政策將使觀光收入增加三成", "kind": "inference", "materiality": "material"},
+            ],
+            "candidates": [
+                {"claim_index": 0, "finding_type": "factual_contradiction", "summary": "確認開放時間", "query": "外籍旅客 入境 開放時間"},
+                {"claim_index": 1, "finding_type": "unsupported_inference", "summary": "增幅缺乏依據", "query": "觀光收入 預估"},
+            ],
+        },
+        assessment=lambda payload: (
+            {"evidence_quote": "明年三月起才開放", "rationale": "官方公告時間不同", "relation": "contradicts"}
+            if "factual_contradiction" in payload["contents"][0]["parts"][0]["text"]
+            else {"evidence_quote": "", "rationale": "無關", "relation": "irrelevant"}
+        ),
+        search_uris=["https://gov.example/notice"],
+    )
+    fetcher = DirectPageFetcher(FakeTransport({
+        "https://gov.example/notice": html_response("https://gov.example/notice", "公告", "外籍旅客明年三月起才開放入境觀光。"),
+    }))
+    extracted, findings, batches = analyze_revision(
+        revision(), GeminiAnalysisProvider(SETTINGS, gemini), GeminiSearchProvider(SETTINGS, gemini), fetcher,
+        GeminiEvidenceAssessor(SETTINGS, gemini),
+    )
+    assert len(extracted.claims) == 2
+    assert [(f.finding_type, f.visible, f.evidence_status) for f in findings] == [
+        ("factual_contradiction", True, "retrieved"),
+        ("unsupported_inference", False, "insufficient_scope"),
+    ]
+    assert batches[0][0].rationale == "官方公告時間不同"

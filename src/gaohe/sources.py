@@ -6,22 +6,18 @@ import re
 from typing import Protocol
 from urllib.error import HTTPError
 from urllib.parse import urljoin
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from xml.etree import ElementTree
 
 from . import __version__
 from .domain import ArticleCandidate
-from .safety import is_http_url as _is_http_url
+from .safety import is_http_url as _is_http_url, is_public_http_url
 
 
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_CANDIDATES = 500
 MAX_TIMEOUT_SECONDS = 20.0
-MAX_REQUEST_HEADER_CHARS = 200
 USER_AGENT = f"GaoHe/{__version__} source-monitor (stdlib)"
-# Conditional-GET validators are the only request headers a caller may add.
-_ALLOWED_REQUEST_HEADERS = {"if-none-match": "If-None-Match", "if-modified-since": "If-Modified-Since"}
-_REMOVED_RESPONSE_HEADERS = {"authorization", "proxy-authorization"}
 _DROP_TAGS = {"form", "footer", "header", "nav", "script", "style"}
 _TEXT_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "li", "p"}
 _CHARSET = re.compile(r"charset\s*=\s*[\"']?([^\s;\"']+)", re.IGNORECASE)
@@ -36,44 +32,40 @@ class HttpResponse:
 
 
 class HttpTransport(Protocol):
-    def fetch(
-        self, url: str, timeout_seconds: float = 20.0, headers: Mapping[str, str] | None = None
-    ) -> HttpResponse: ...
+    def fetch(self, url: str) -> HttpResponse: ...
 
 
-def _request_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
-    """Keep only If-None-Match / If-Modified-Since with short, printable ASCII values; drop everything else."""
-    allowed: dict[str, str] = {}
-    for name, value in (headers or {}).items():
-        canonical = _ALLOWED_REQUEST_HEADERS.get(name.strip().lower()) if isinstance(name, str) else None
-        if canonical is None or not isinstance(value, str):
-            continue
-        value = value.strip()
-        if value and len(value) <= MAX_REQUEST_HEADER_CHARS and value.isascii() and value.isprintable():
-            allowed[canonical] = value
-    return allowed
+class BlockedDestination(ValueError):
+    """A feed, search result or redirect pointed at a local or private address."""
 
 
-def _response_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
-    return {key: value for key, value in (headers or {}).items() if key.lower() not in _REMOVED_RESPONSE_HEADERS}
+class _PublicRedirects(HTTPRedirectHandler):
+    def __init__(self, allow_private: bool) -> None:
+        self._allow_private = allow_private
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401 - urllib hook
+        if not self._allow_private and not is_public_http_url(newurl):
+            raise BlockedDestination("redirect to a non-public address was refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class UrllibTransport:
-    def fetch(
-        self, url: str, timeout_seconds: float = 20.0, headers: Mapping[str, str] | None = None
-    ) -> HttpResponse:
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
-        timeout_seconds = min(float(timeout_seconds), MAX_TIMEOUT_SECONDS)
-        request = Request(url, headers={**_request_headers(headers), "User-Agent": USER_AGENT})
+    """GET with a bounded body; refuses loopback/private destinations, including via redirects."""
+
+    def __init__(self, *, allow_private: bool = False, timeout_seconds: float = 20.0) -> None:
+        self._allow_private = allow_private
+        self._timeout = timeout_seconds
+        self._opener = build_opener(_PublicRedirects(allow_private))
+
+    def fetch(self, url: str) -> HttpResponse:
+        if not self._allow_private and not is_public_http_url(url):
+            raise BlockedDestination("non-public address was refused")
+        request = Request(url, headers={"User-Agent": USER_AGENT})
         try:
-            with urlopen(request, timeout=timeout_seconds) as response:
+            with self._opener.open(request, timeout=self._timeout) as response:
                 return self._response(response.status, response.geturl(), response.headers, response)
         except HTTPError as error:
             try:
-                if error.code == 304:
-                    # Not Modified carries validators but never a body; the caller keeps its stored copy.
-                    return HttpResponse(304, error.geturl(), _response_headers(error.headers), b"")
                 return self._response(error.code, error.geturl(), error.headers, error)
             finally:
                 error.close()
@@ -81,7 +73,8 @@ class UrllibTransport:
     @staticmethod
     def _response(status: int, url: str, headers: Mapping[str, str], stream: object) -> HttpResponse:
         body = stream.read(MAX_RESPONSE_BYTES + 1)  # type: ignore[attr-defined]
-        return HttpResponse(status, url, _response_headers(headers), body if len(body) <= MAX_RESPONSE_BYTES else b"")
+        safe_headers = {key: value for key, value in headers.items() if key.lower() not in {"authorization", "set-cookie"}}
+        return HttpResponse(status, url, safe_headers, body if len(body) <= MAX_RESPONSE_BYTES else b"")
 
 
 def _text(value: str | None) -> str:

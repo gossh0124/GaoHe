@@ -4,6 +4,7 @@
 - 狀態：待使用者審閱
 - 範圍：固定媒體監測、文章版本、證據查證、同題對照、Windows 使用者流程
 - 依賴：既有 Windows 原生基線與 GitHub CI；CD 仍暫緩
+- 2026-10-01 瘦身：移除同題分組與「實質跨媒體差異」標註（第 8 節暫不實作），可見標註只剩事實矛盾與推論超出證據；新增單篇網址查核與 Gemini Google Search 證據搜尋。詳見 `docs/superpowers/plans/2026-09-29-gaohe-optimization-round.md`。
 
 ## 1. 問題本質
 

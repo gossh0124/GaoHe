@@ -1,315 +1,84 @@
-from datetime import datetime, timezone
-import sqlite3
+from datetime import datetime, timedelta, timezone
 
+import pytest
+
+from conftest import FakeTransport, html_response, rss
 from gaohe.config import Settings
 from gaohe.domain import Source
+from gaohe.monitor import MAX_ARTICLE_FETCHES_PER_SOURCE, MIN_HOST_DELAY_SECONDS, needs_fetch, parse_time, watch_once
 from gaohe.sources import HttpResponse
-from gaohe.storage import Store
 
-
-NOW = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
-
-
-class FakeTransport:
-    def __init__(self, responses):
-        self.responses = responses
-        self.calls = []
-
-    def fetch(self, url, timeout_seconds=20.0):
-        self.calls.append(url)
-        response = self.responses[url]
-        if isinstance(response, Exception):
-            raise response
-        return response
-
-
-def response(url, body, content_type="text/html"):
-    return HttpResponse(200, url, {"Content-Type": content_type}, body)
-
-
-def rss(url="https://example.test/story", title="Story"):
-    return (
-        b"<rss><channel><title>Example</title><item><title>"
-        + title.encode()
-        + b"</title><link>"
-        + url.encode()
-        + b"</link><pubDate>2026-09-18T10:00:00Z</pubDate></item></channel></rss>"
-    )
-
-
-def monitor(settings, store, transport):
-    from gaohe.monitor import watch_once
-
-    # Per-host politeness would otherwise really sleep between the feed and article requests.
-    return watch_once(settings, store, transport, now=NOW, sleep=lambda _seconds: None)
-
-
-def make_store(tmp_path):
-    store = Store(tmp_path / "monitor.db")
-    store.initialize()
-    return store
-
-
-def test_no_sources_records_an_empty_run(tmp_path):
-    store = make_store(tmp_path)
-
-    summary = monitor(Settings(data_dir=tmp_path), store, FakeTransport({}))
-
-    assert summary.sources_checked == 0
-    assert summary.candidates_seen == 0
-    assert summary.revisions_created == 0
-    assert summary.failures == 0
-    with sqlite3.connect(store.path) as connection:
-        assert connection.execute("SELECT sources_checked, failures FROM runs").fetchall() == [(0, 0)]
-
-
-def test_new_article_is_bound_to_persisted_source_before_its_first_revision(tmp_path):
-    store = make_store(tmp_path)
-    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
-    transport = FakeTransport(
-        {
-            "https://example.test/feed": response("https://example.test/feed", rss(), "application/rss+xml"),
-            "https://example.test/story": response("https://example.test/story", b"<main><p>First body</p></main>"),
-        }
-    )
-
-    summary = monitor(Settings(data_dir=tmp_path), store, transport)
-
-    assert summary.revisions_created == 1
-    with sqlite3.connect(store.path) as connection:
-        assert connection.execute("SELECT source_id FROM articles").fetchall() == [(source_id,)]
-
-
-def test_failed_first_fetch_preserves_candidate_metadata_for_a_later_revision(tmp_path):
-    store = make_store(tmp_path)
-    source_id = store.add_source(Source(None, "Example", "https://example.test/feed"))
-    transport = FakeTransport(
-        {
-            "https://example.test/feed": response("https://example.test/feed", rss(), "application/rss+xml"),
-            "https://example.test/story": OSError("offline"),
-        }
-    )
-
-    first = monitor(Settings(data_dir=tmp_path), store, transport)
-
-    assert (first.revisions_created, first.failures) == (0, 1)
-    with sqlite3.connect(store.path) as connection:
-        assert connection.execute("SELECT source_id, url, title FROM articles").fetchall() == [
-            (source_id, "https://example.test/story", "Story")
-        ]
-        assert connection.execute("SELECT id FROM article_revisions").fetchall() == []
-
-    transport.responses["https://example.test/story"] = response(
-        "https://example.test/story", b"<main><p>Recovered body</p></main>"
-    )
-
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
-    with sqlite3.connect(store.path) as connection:
-        assert connection.execute("SELECT text FROM article_revisions").fetchall() == [("Recovered body",)]
-
-
-def test_unchanged_article_creates_no_revision_on_a_second_run(tmp_path):
-    store = make_store(tmp_path)
-    store.add_source(Source(None, "Example", "https://example.test/feed"))
-    transport = FakeTransport(
-        {
-            "https://example.test/feed": response("https://example.test/feed", rss(), "application/rss+xml"),
-            "https://example.test/story": response("https://example.test/story", b"<main><p>Same body</p></main>"),
-        }
-    )
-
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 0
-    assert transport.calls.count("https://example.test/story") == 2
-
-
-def test_sitemap_lastmod_date_does_not_break_revision_persistence(tmp_path):
-    store = make_store(tmp_path)
-    store.add_source(Source(None, "Sitemap", "https://example.test/sitemap.xml"))
-    transport = FakeTransport(
-        {
-            "https://example.test/sitemap.xml": response(
-                "https://example.test/sitemap.xml",
-                b"<urlset><url><loc>https://example.test/story</loc><lastmod>2026-09-18</lastmod></url></urlset>",
-                "application/xml",
-            ),
-            "https://example.test/story": response("https://example.test/story", b"<main><p>Body</p></main>"),
-        }
-    )
-
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
-
-
-def test_unchanged_sitemap_lastmod_skips_the_known_article_body_fetch(tmp_path):
-    store = make_store(tmp_path)
-    store.add_source(Source(None, "Sitemap", "https://example.test/sitemap.xml"))
-    transport = FakeTransport(
-        {
-            "https://example.test/sitemap.xml": response(
-                "https://example.test/sitemap.xml",
-                b"<urlset><url><loc>https://example.test/story</loc><lastmod>2026-09-18</lastmod></url></urlset>",
-                "application/xml",
-            ),
-            "https://example.test/story": response("https://example.test/story", b"<main><p>Body</p></main>"),
-        }
-    )
-
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 0
-    assert transport.calls.count("https://example.test/story") == 1
-
-
-def test_unchanged_candidate_article_etag_skips_the_known_article_body_fetch(tmp_path, monkeypatch):
-    import gaohe.monitor as monitor_module
-
-    store = make_store(tmp_path)
-    store.add_source(Source(None, "Feed", "https://example.test/feed"))
-    candidate = monitor_module.ArticleCandidate(
-        0,
-        "https://example.test/story",
-        "Story",
-        "2026-09-18T10:00:00Z",
-        "2026-09-18T12:00:00Z",
-        {"article_etag": "article-v1"},
-    )
-    monkeypatch.setattr(monitor_module, "_candidates", lambda *_args: [candidate])
-    transport = FakeTransport(
-        {
-            "https://example.test/feed": HttpResponse(
-                200,
-                "https://example.test/feed",
-                {"Content-Type": "application/rss+xml"},
-                rss(),
-            ),
-            "https://example.test/story": response("https://example.test/story", b"<main><p>Body</p></main>"),
-        }
-    )
-
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 0
-    assert transport.calls.count("https://example.test/story") == 1
-
-
-def test_unchanged_feed_etag_does_not_skip_a_changed_article_body(tmp_path):
-    store = make_store(tmp_path)
-    store.add_source(Source(None, "Feed", "https://example.test/feed"))
-    transport = FakeTransport(
-        {
-            "https://example.test/feed": HttpResponse(
-                200,
-                "https://example.test/feed",
-                {"Content-Type": "application/rss+xml", "ETag": "feed-v1"},
-                rss(),
-            ),
-            "https://example.test/story": response("https://example.test/story", b"<main><p>A</p></main>"),
-        }
-    )
-
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
-    transport.responses["https://example.test/story"] = response(
-        "https://example.test/story", b"<main><p>B</p></main>"
-    )
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
-    assert transport.calls.count("https://example.test/story") == 2
-
-
-def test_changed_candidate_marker_with_same_content_is_persisted_without_a_revision(tmp_path, monkeypatch):
-    import gaohe.monitor as monitor_module
-
-    store = make_store(tmp_path)
-    store.add_source(Source(None, "Feed", "https://example.test/feed"))
-    marker = {"value": "article-v1"}
-
-    def candidates(*_args):
-        return [
-            monitor_module.ArticleCandidate(
-                0,
-                "https://example.test/story",
-                "Story",
-                "2026-09-18T10:00:00Z",
-                "2026-09-18T12:00:00Z",
-                {"article_etag": marker["value"]},
-            )
-        ]
-
-    monkeypatch.setattr(monitor_module, "_candidates", candidates)
-    transport = FakeTransport(
-        {
-            "https://example.test/feed": response("https://example.test/feed", rss(), "application/rss+xml"),
-            "https://example.test/story": response("https://example.test/story", b"<main><p>Same</p></main>"),
-        }
-    )
-
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
-    marker["value"] = "article-v2"
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 0
-    assert store.latest_article_metadata("https://example.test/story")["_article_marker"] == "article_etag:article-v2"
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 0
-    assert transport.calls.count("https://example.test/story") == 2
-
-
-def test_changed_then_reverted_article_creates_each_current_state_transition(tmp_path):
-    store = make_store(tmp_path)
-    store.add_source(Source(None, "Example", "https://example.test/feed"))
-    transport = FakeTransport(
-        {
-            "https://example.test/feed": response("https://example.test/feed", rss(), "application/rss+xml"),
-            "https://example.test/story": response("https://example.test/story", b"<main><p>A</p></main>"),
-        }
-    )
-
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
-    transport.responses["https://example.test/story"] = response("https://example.test/story", b"<main><p>B</p></main>")
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
-    transport.responses["https://example.test/story"] = response("https://example.test/story", b"<main><p>A</p></main>")
-    assert monitor(Settings(data_dir=tmp_path), store, transport).revisions_created == 1
-
-
-def test_a_failed_source_does_not_prevent_another_source_from_creating_a_revision(tmp_path):
-    store = make_store(tmp_path)
-    store.add_source(Source(None, "Broken", "https://example.test/broken"))
-    store.add_source(Source(None, "Working", "https://example.test/feed"))
-    transport = FakeTransport(
-        {
-            "https://example.test/broken": OSError("offline"),
-            "https://example.test/feed": response("https://example.test/feed", rss(), "application/rss+xml"),
-            "https://example.test/story": response("https://example.test/story", b"<main><p>Working body</p></main>"),
-        }
-    )
-
-    summary = monitor(Settings(data_dir=tmp_path), store, transport)
-
-    assert (summary.sources_checked, summary.revisions_created, summary.failures) == (2, 1, 1)
-    with sqlite3.connect(store.path) as connection:
-        assert connection.execute("SELECT status FROM source_checks ORDER BY id").fetchall() == [("failed",), ("ok",)]
-
-
-def test_malformed_feed_is_a_source_failure_and_empty_article_text_is_an_article_failure(tmp_path):
-    store = make_store(tmp_path)
-    store.add_source(Source(None, "Malformed", "https://example.test/malformed"))
-    store.add_source(Source(None, "Empty article", "https://example.test/feed"))
-    transport = FakeTransport(
-        {
-            "https://example.test/malformed": response("https://example.test/malformed", b"<rss>", "application/rss+xml"),
-            "https://example.test/feed": response("https://example.test/feed", rss(), "application/rss+xml"),
-            "https://example.test/story": response("https://example.test/story", b"<html><body>no semantic text</body></html>"),
-        }
-    )
-
-    summary = monitor(Settings(data_dir=tmp_path), store, transport)
-
-    assert (summary.candidates_seen, summary.revisions_created, summary.failures) == (1, 0, 2)
-
-
-def test_watch_cli_prints_only_compact_counts_and_keeps_partial_failures_successful(tmp_path, monkeypatch, capsys):
-    import gaohe.cli as cli
-    from gaohe.domain import RunSummary
-
-    monkeypatch.setattr(
-        cli,
-        "watch_once",
-        lambda *_args: RunSummary("2026-09-18T12:00:00Z", "2026-09-18T12:00:00Z", 2, 3, 1, 1),
-    )
-
-    assert cli.main(["watch", "--once", "--env-file", str(tmp_path / ".env")]) == 0
-    assert capsys.readouterr().out == "checked=2 candidates=3 revisions=1 failures=1\n"
+NOW = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
+FEED = "https://a.example/rss"
+
+
+def iso(moment):
+    return moment.isoformat().replace("+00:00", "Z")
+
+
+def feed_response(*items, url=FEED):
+    return HttpResponse(200, url, {"Content-Type": "application/rss+xml"}, rss(*items))
+
+
+def watch(store, transport, now=NOW, sleeps=None):
+    # A frozen clock: every same-host request must wait the full delay (recorded, never slept).
+    return watch_once(Settings(), store, transport, now, clock=lambda: 0.0, sleep=(sleeps if sleeps is not None else []).append)
+
+
+@pytest.mark.parametrize("state, expected", [
+    (None, True),
+    ({"content_hash": None}, True),
+    ({"content_hash": "h", "published_at": iso(NOW - timedelta(hours=10)), "last_fetched_at": iso(NOW - timedelta(hours=4))}, True),
+    ({"content_hash": "h", "published_at": iso(NOW - timedelta(hours=10)), "last_fetched_at": iso(NOW - timedelta(hours=1))}, False),
+    ({"content_hash": "h", "published_at": iso(NOW - timedelta(days=3)), "last_fetched_at": iso(NOW - timedelta(days=1))}, False),
+    ({"content_hash": "h", "discovered_at": iso(NOW - timedelta(hours=5)), "last_fetched_at": iso(NOW - timedelta(hours=3))}, True),
+])
+def test_needs_fetch_rule(state, expected):
+    assert needs_fetch(state, NOW) is expected
+
+
+def test_parse_time_reads_taiwan_cst_and_rejects_naive_values():
+    assert parse_time("Wed, 01 Oct 2026 20:00:00 CST") == NOW
+    assert parse_time("2026-10-01T20:00:00+08:00") == NOW
+    assert parse_time("2026-10-01T12:00:00") is None and parse_time("soon") is None
+
+
+def test_new_articles_are_fetched_once_and_rechecked_only_while_fresh(store):
+    store.add_source(Source(None, "甲報", FEED))
+    article = "https://a.example/news/1"
+    transport = FakeTransport({
+        FEED: feed_response(("開放觀光", article, "Wed, 01 Oct 2026 19:00:00 +0800")),
+        article: html_response(article, "開放觀光", "第一版"),
+    })
+    first = watch(store, transport)
+    assert (first.sources_checked, first.candidates_seen, first.revisions_created, first.failures) == (1, 1, 1, 0)
+    assert watch(store, transport, NOW + timedelta(hours=1)).revisions_created == 0
+    assert transport.calls.count(article) == 1  # not due an hour later
+    transport.pages[article] = html_response(article, "開放觀光", "更正後的第二版")
+    assert watch(store, transport, NOW + timedelta(hours=4)).revisions_created == 1
+    assert watch(store, transport, NOW + timedelta(days=3)).revisions_created == 0
+    assert transport.calls.count(article) == 2
+
+
+def test_per_source_cap_host_delay_and_cross_source_dedupe(store):
+    store.add_source(Source(None, "甲報", FEED))
+    store.add_source(Source(None, "乙報", "https://b.example/rss"))
+    links = [f"https://a.example/n/{index}" for index in range(MAX_ARTICLE_FETCHES_PER_SOURCE + 5)]
+    pages = {link: html_response(link, "t", f"內文 {link}") for link in links}
+    pages[FEED] = feed_response(*[("t", link, None) for link in links])
+    pages["https://b.example/rss"] = feed_response(("t", links[0], None), url="https://b.example/rss")
+    sleeps = []
+    summary = watch(store, FakeTransport(pages), sleeps=sleeps)
+    assert summary.revisions_created == MAX_ARTICLE_FETCHES_PER_SOURCE
+    assert sleeps and set(sleeps) == {MIN_HOST_DELAY_SECONDS}
+    assert summary.candidates_seen == len(links) + 1
+
+
+def test_failures_are_recorded_per_source_and_an_empty_feed_is_fine(store):
+    broken = store.add_source(Source(None, "壞掉", "https://broken.example/rss"))
+    store.add_source(Source(None, "空的", FEED))
+    transport = FakeTransport({"https://broken.example/rss": OSError("refused"), FEED: feed_response()})
+    summary = watch(store, transport)
+    assert (summary.sources_checked, summary.failures) == (2, 1)
+    statuses = {row["id"]: row["status"] for row in store.dashboard_snapshot()["sources"]}
+    assert statuses[broken] == "failed" and list(statuses.values()).count("ok") == 1

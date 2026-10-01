@@ -101,7 +101,7 @@ def test_run_watch_script_orders_analysis_after_watch_and_keeps_watch_exit_path(
 
 def test_cli_schedule_commands_use_scheduler_runner_without_auto_install(tmp_path, monkeypatch, capsys):
     runner = FakeRunner(result(), result(), result())
-    monkeypatch.setattr(cli, "SchedulerRunner", lambda: runner)
+    monkeypatch.setattr(scheduler, "SchedulerRunner", lambda: runner)
     env_file = tmp_path / ".env"
     env_file.write_text("POLL_INTERVAL_MINUTES=12\n", encoding="utf-8")
 

@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+SEARCH_PROVIDERS = ("gemini", "none")
+
+
 def _read_env_file(path: Path | None) -> dict[str, str]:
     if path is None or not path.is_file():
         return {}
@@ -23,26 +26,14 @@ def _read_env_file(path: Path | None) -> dict[str, str]:
     return values
 
 
-def _positive_int(name: str, raw: str) -> int:
-    try:
-        number = int(raw)
-    except ValueError as error:
-        raise ValueError(f"{name} must be a positive integer") from error
-    if number <= 0:
-        raise ValueError(f"{name} must be a positive integer")
-    return number
-
-
 @dataclass(frozen=True)
 class Settings:
     llm_provider: str = ""
     llm_model: str = ""
     llm_api_key: str = field(default="", repr=False)
-    web_search_provider: str = "none"
-    firecrawl_api_key: str = field(default="", repr=False)
+    web_search_provider: str = "gemini"
     data_dir: Path = field(default_factory=lambda: Path.home() / "AppData" / "Local" / "GaoHe")
     poll_interval_minutes: int = 60
-    daily_llm_call_limit: int = 200
 
     @property
     def database_path(self) -> Path:
@@ -52,20 +43,17 @@ class Settings:
     def has_llm_key(self) -> bool:
         return bool(self.llm_api_key)
 
-    @property
-    def has_firecrawl_key(self) -> bool:
-        return bool(self.firecrawl_api_key)
-
     def validate(self) -> list[str]:
+        """Return what is missing for AI analysis; monitoring works without any of it."""
         missing: list[str] = []
-        if not self.llm_provider:
-            missing.append("LLM_PROVIDER is required")
+        if self.llm_provider != "gemini":
+            missing.append("LLM_PROVIDER must be gemini")
         if not self.llm_model:
             missing.append("LLM_MODEL is required")
         if not self.has_llm_key:
             missing.append("LLM_API_KEY is required")
-        if self.web_search_provider == "firecrawl" and not self.has_firecrawl_key:
-            missing.append("FIRECRAWL_API_KEY is required when WEB_SEARCH_PROVIDER=firecrawl")
+        if self.web_search_provider not in SEARCH_PROVIDERS:
+            missing.append("WEB_SEARCH_PROVIDER must be gemini or none")
         return missing
 
 
@@ -73,33 +61,27 @@ def load_settings(
     env_file: Path | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> Settings:
-    file_values = _read_env_file(Path(".env") if env_file is None else env_file)
-    merged = dict(file_values)
+    merged = _read_env_file(Path(".env") if env_file is None else env_file)
     merged.update(dict(os.environ if environ is None else environ))
 
     def value(name: str, default: str, legacy_name: str | None = None) -> str:
-        if name in merged:
-            candidate = merged[name].strip()
-        elif legacy_name:
-            candidate = merged.get(legacy_name, "").strip()
-        else:
-            candidate = ""
+        candidate = merged.get(name, merged.get(legacy_name, "") if legacy_name else "").strip()
         return candidate or default
 
-    poll_interval_minutes = _positive_int("POLL_INTERVAL_MINUTES", value("POLL_INTERVAL_MINUTES", "60"))
-    daily_llm_call_limit = _positive_int("DAILY_LLM_CALL_LIMIT", value("DAILY_LLM_CALL_LIMIT", "200"))
+    try:
+        poll_interval_minutes = int(value("POLL_INTERVAL_MINUTES", "60"))
+    except ValueError:
+        poll_interval_minutes = 0
+    if poll_interval_minutes <= 0:
+        # The value itself is never echoed: .env files hold keys too.
+        raise ValueError("POLL_INTERVAL_MINUTES must be a positive integer")
 
-    data_dir = value(
-        "DATA_DIR",
-        str(Path(merged.get("LOCALAPPDATA", "").strip() or Path.home() / "AppData" / "Local") / "GaoHe"),
-    )
+    local_app_data = merged.get("LOCALAPPDATA", "").strip() or str(Path.home() / "AppData" / "Local")
     return Settings(
         llm_provider=value("LLM_PROVIDER", ""),
         llm_model=value("LLM_MODEL", "", "GEMINI_MODEL"),
         llm_api_key=value("LLM_API_KEY", "", "GOOGLE_API_KEY"),
-        web_search_provider=value("WEB_SEARCH_PROVIDER", "none", "SEARCH_PROVIDER"),
-        firecrawl_api_key=value("FIRECRAWL_API_KEY", ""),
-        data_dir=Path(data_dir),
+        web_search_provider=value("WEB_SEARCH_PROVIDER", "gemini"),
+        data_dir=Path(value("DATA_DIR", str(Path(local_app_data) / "GaoHe"))),
         poll_interval_minutes=poll_interval_minutes,
-        daily_llm_call_limit=daily_llm_call_limit,
     )

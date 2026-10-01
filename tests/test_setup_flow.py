@@ -211,15 +211,15 @@ def test_setup_page_identifies_gemini_as_the_only_current_provider():
     page = _page(SetupState(False, False, 0, ()))
 
     assert "Gemini（目前唯一支援）" in page
-    assert "其他 AI 服務供應商將在未來版本支援。" in page
+    assert "value='gemini-2.5-flash'" in page  # a working default model is pre-filled
 
 
 def test_setup_page_is_zh_tw_and_explains_own_key_and_external_transfer():
     page = _page(SetupState(False, True, 2, ()), form_token="tok'en")
 
     assert '<html lang="zh-Hant-TW">' in page
-    assert "自己的 Gemini API 金鑰" in page and "不提供共用的雲端帳號" in page
-    assert "文章內容可能會送到你選擇的 AI 服務供應商" in page
+    assert "Gemini API 金鑰" in page and "Firecrawl" not in page
+    assert "文章內容與查核問題會送到 Gemini" in page and "Google 搜尋" in page
     assert "不會繞過登入、付費牆、CAPTCHA" in page
     assert "本機狀態：AI 金鑰已設定；媒體來源 2 個。" in page
     assert "value='tok&#x27;en'" in page
@@ -236,7 +236,8 @@ def test_setup_page_escapes_error_messages():
 def test_setup_complete_page_is_zh_tw():
     page = _page(SetupState(True, True, 1, ()), complete=True)
 
-    assert "稿核已完成設定" in page and "gaohe serve" in page and "<form" not in page
+    assert "稿核已完成設定" in page and "<form" not in page
+    assert "gaohe " not in page  # ZIP users have no gaohe command on PATH
 
 
 def test_setup_server_sends_security_headers_and_embeds_token(tmp_path):
@@ -350,7 +351,7 @@ def test_setup_server_unknown_path_and_methods_are_rejected_with_headers(tmp_pat
 
     assert not_found.status == 404
     assert_security_headers(not_found)
-    assert not_allowed.status == 405 and not_allowed.getheader("Allow") == "GET, HEAD, POST"
+    assert not_allowed.status == 501  # only GET, HEAD and POST are implemented
     assert_security_headers(not_allowed)
     assert head.status == 200 and head_body == b"" and int(head.getheader("Content-Length")) > 0
 

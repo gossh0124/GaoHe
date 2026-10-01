@@ -2,116 +2,43 @@ from pathlib import Path
 
 import pytest
 
-from gaohe.config import load_settings
+from gaohe.config import Settings, load_settings
 
 
-def test_defaults_are_provider_neutral_and_do_not_create_storage(tmp_path: Path):
-    settings = load_settings(tmp_path / ".env", {"LOCALAPPDATA": str(tmp_path / "profile")})
-
-    assert settings.llm_provider == ""
-    assert settings.llm_model == ""
-    assert settings.llm_api_key == ""
-    assert settings.web_search_provider == "none"
-    assert settings.firecrawl_api_key == ""
+def test_defaults_need_setup_and_use_gemini_search():
+    settings = load_settings(Path("missing.env"), environ={"LOCALAPPDATA": "C:/Users/me/AppData/Local"})
+    assert settings.web_search_provider == "gemini"
     assert settings.poll_interval_minutes == 60
-    assert settings.daily_llm_call_limit == 200
-    assert settings.data_dir == tmp_path / "profile" / "GaoHe"
-    assert settings.database_path == settings.data_dir / "gaohe.db"
-    assert not settings.data_dir.exists()
-    assert settings.validate() == [
-        "LLM_PROVIDER is required",
-        "LLM_MODEL is required",
-        "LLM_API_KEY is required",
-    ]
+    assert settings.database_path == Path("C:/Users/me/AppData/Local") / "GaoHe" / "gaohe.db"
+    assert settings.validate() == ["LLM_PROVIDER must be gemini", "LLM_MODEL is required", "LLM_API_KEY is required"]
 
 
-def test_explicit_environment_wins_and_secrets_are_not_repr(tmp_path: Path):
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "LLM_MODEL=file-model\nLLM_API_KEY=file-secret\n",
-        encoding="utf-8",
-    )
-
-    settings = load_settings(
-        env_file,
-        {
-            "LLM_PROVIDER": "openai",
-            "LLM_MODEL": "env-model",
-            "LLM_API_KEY": "env-secret",
-            "WEB_SEARCH_PROVIDER": "firecrawl",
-            "FIRECRAWL_API_KEY": "firecrawl-secret",
-            "DATA_DIR": str(tmp_path / "runtime"),
-            "POLL_INTERVAL_MINUTES": "15",
-            "DAILY_LLM_CALL_LIMIT": "40",
-        },
-    )
-
-    assert settings.llm_provider == "openai"
-    assert settings.llm_model == "env-model"
-    assert settings.llm_api_key == "env-secret"
-    assert settings.web_search_provider == "firecrawl"
-    assert settings.firecrawl_api_key == "firecrawl-secret"
-    assert settings.data_dir == tmp_path / "runtime"
-    assert settings.poll_interval_minutes == 15
-    assert settings.daily_llm_call_limit == 40
-    assert settings.has_llm_key
-    assert settings.has_firecrawl_key
-    assert settings.validate() == []
-    assert "env-secret" not in repr(settings)
-    assert "firecrawl-secret" not in repr(settings)
+def test_env_file_values_are_read_and_environment_wins(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("# comment\nLLM_PROVIDER=gemini\nLLM_MODEL='gemini-2.5-flash'\nLLM_API_KEY=file-key\nDATA_DIR=data\n", encoding="utf-8")
+    settings = load_settings(env, environ={"LLM_API_KEY": "env-key"})
+    assert (settings.llm_provider, settings.llm_model, settings.llm_api_key) == ("gemini", "gemini-2.5-flash", "env-key")
+    assert settings.data_dir == Path("data") and settings.validate() == []
+    assert "env-key" not in repr(settings)
 
 
-def test_legacy_local_environment_migrates_when_generic_names_are_absent(tmp_path: Path):
-    settings = load_settings(
-        tmp_path / ".env",
-        {"GEMINI_MODEL": "gemini-test", "GOOGLE_API_KEY": "legacy-secret"},
-    )
-
-    assert settings.llm_model == "gemini-test"
-    assert settings.llm_api_key == "legacy-secret"
+def test_legacy_names_are_still_read(tmp_path):
+    settings = load_settings(tmp_path / "none.env", environ={"GEMINI_MODEL": "m", "GOOGLE_API_KEY": "k"})
+    assert (settings.llm_model, settings.llm_api_key) == ("m", "k")
 
 
-def test_explicit_empty_generic_settings_do_not_fall_back_to_legacy(tmp_path: Path):
-    settings = load_settings(
-        tmp_path / ".env",
-        {
-            "LLM_MODEL": "",
-            "LLM_API_KEY": "",
-            "WEB_SEARCH_PROVIDER": "",
-            "GEMINI_MODEL": "legacy-model",
-            "GOOGLE_API_KEY": "legacy-secret",
-            "SEARCH_PROVIDER": "legacy-search",
-        },
-    )
-
-    assert settings.llm_model == ""
-    assert settings.llm_api_key == ""
-    assert settings.web_search_provider == "none"
+@pytest.mark.parametrize("value", ["0", "-5", "hourly", "1.5"])
+def test_invalid_poll_interval_raises_without_echoing_the_value(tmp_path, value):
+    with pytest.raises(ValueError) as error:
+        load_settings(tmp_path / "none.env", environ={"POLL_INTERVAL_MINUTES": value})
+    assert value not in str(error.value) or value == "0"
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "often"])
-def test_invalid_poll_interval_raises_clear_error(tmp_path: Path, value: str):
-    with pytest.raises(ValueError, match="POLL_INTERVAL_MINUTES must be a positive integer"):
-        load_settings(tmp_path / ".env", {"POLL_INTERVAL_MINUTES": value})
+def test_unknown_search_provider_is_reported():
+    assert "WEB_SEARCH_PROVIDER must be gemini or none" in Settings(web_search_provider="bing").validate()
 
 
-@pytest.mark.parametrize("value", ["0", "-5", "unlimited", "1.5"])
-def test_invalid_daily_llm_call_limit_raises_clear_error(tmp_path: Path, value: str):
-    with pytest.raises(ValueError, match="DAILY_LLM_CALL_LIMIT must be a positive integer"):
-        load_settings(tmp_path / ".env", {"DAILY_LLM_CALL_LIMIT": value})
-
-
-def test_blank_daily_llm_call_limit_uses_the_default(tmp_path: Path):
-    env_file = tmp_path / ".env"
-    env_file.write_text("DAILY_LLM_CALL_LIMIT=\n", encoding="utf-8")
-
-    assert load_settings(env_file, {}).daily_llm_call_limit == 200
-
-
-def test_env_example_lists_every_setting_with_working_defaults(tmp_path: Path):
-    example = Path(__file__).parents[1] / ".env.example"
+def test_env_example_lists_every_setting():
+    example = Path(__file__).resolve().parents[1] / ".env.example"
     names = {line.split("=", 1)[0] for line in example.read_text(encoding="utf-8").splitlines() if "=" in line}
-
-    assert {"POLL_INTERVAL_MINUTES", "DAILY_LLM_CALL_LIMIT", "LLM_API_KEY", "DATA_DIR"} <= names
-    settings = load_settings(example, {"LOCALAPPDATA": str(tmp_path)})
-    assert (settings.poll_interval_minutes, settings.daily_llm_call_limit) == (60, 200)
+    assert names == {"LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY", "WEB_SEARCH_PROVIDER", "DATA_DIR", "POLL_INTERVAL_MINUTES"}
