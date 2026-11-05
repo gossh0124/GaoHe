@@ -1,6 +1,6 @@
 # 稿核 GaoHe
 
-> **方向調整（2026-11-05）：** GaoHe 正轉向「Claude Skill＋遠端連接器」架構：使用者用自己的 AI 訂閱查核網址或關鍵字，AI 依公開評分準則產出中立性分項紀錄，經多帳號共識驗證後聚合為共享的機構／作者紀錄。新設計見 [`docs/superpowers/specs/2026-11-05-gaohe-skill-connector-design.md`](docs/superpowers/specs/2026-11-05-gaohe-skill-connector-design.md)。以下內容描述的是將凍結的 Windows 本機監測版；其中「不產生媒體評分」等敘述已由新設計取代。
+> **方向調整（2026-11-05）：** GaoHe 正轉向「Claude Skill＋遠端連接器」架構：使用者用自己的 AI 訂閱查核網址或關鍵字，AI 依公開評分準則產出報導寫作特徵分項紀錄，經多帳號共識驗證後聚合為共享的機構／作者紀錄。新設計見 [`docs/superpowers/specs/2026-11-05-gaohe-skill-connector-design.md`](docs/superpowers/specs/2026-11-05-gaohe-skill-connector-design.md)。以下內容描述的是將凍結的 Windows 本機監測版；其中「不產生媒體評分」等敘述已由新設計取代。
 
 稿核是本機優先的媒體「稿後複驗」工具。它不替整篇文章產生單一真假結論，也不是官方闢謠平台。
 
