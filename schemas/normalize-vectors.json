@@ -1,0 +1,340 @@
+{
+  "$comment": "GaoHe match-key test vectors (spec §6.1-3). matchKey: strip Cf + variation selectors, NFKC, strip whitespace, map quotes to \", dash runs to -, ellipsis runs to U+2026. splitParagraphs: split on line breaks, trim, drop empty keys, merge keys < 20 code points into the next paragraph (trailing remainder into the previous one).",
+  "version": 2,
+  "matchKey": [
+    {
+      "name": "plain ascii unchanged",
+      "input": "abc",
+      "expectedMatchKey": "abc"
+    },
+    {
+      "name": "full-width comma/exclamation/question/colon/semicolon → ASCII via NFKC",
+      "input": "你好，世界！真的？是：對；",
+      "expectedMatchKey": "你好,世界!真的?是:對;"
+    },
+    {
+      "name": "half-width comma identical to full-width",
+      "input": "你好,世界!真的?是:對;",
+      "expectedMatchKey": "你好,世界!真的?是:對;"
+    },
+    {
+      "name": "full-width parentheses and digits",
+      "input": "（２０２６）",
+      "expectedMatchKey": "(2026)"
+    },
+    {
+      "name": "ideographic full stop and enumeration comma kept",
+      "input": "甲、乙。",
+      "expectedMatchKey": "甲、乙。"
+    },
+    {
+      "name": "corner brackets 「」 → canonical quote",
+      "input": "他說「不會」。",
+      "expectedMatchKey": "他說\"不會\"。"
+    },
+    {
+      "name": "curly double quotes “” → canonical quote",
+      "input": "他說“不會”。",
+      "expectedMatchKey": "他說\"不會\"。"
+    },
+    {
+      "name": "white corner brackets 『』 → canonical quote",
+      "input": "『好』",
+      "expectedMatchKey": "\"好\""
+    },
+    {
+      "name": "single curly quotes, low-9 and reversed quotes",
+      "input": "‘a’‚b‛„c‟",
+      "expectedMatchKey": "\"a\"\"b\"\"c\""
+    },
+    {
+      "name": "ASCII apostrophe and full-width quotation mark",
+      "input": "'x'＂y＂",
+      "expectedMatchKey": "\"x\"\"y\""
+    },
+    {
+      "name": "CJK double prime quotes 〝〞",
+      "input": "〝z〞",
+      "expectedMatchKey": "\"z\""
+    },
+    {
+      "name": "guillemets « » ‹ › → canonical quote",
+      "input": "«a»‹b›",
+      "expectedMatchKey": "\"a\"\"b\""
+    },
+    {
+      "name": "ditto mark 〃 and double prime ″ are NOT quotes (″ becomes ′′ via NFKC)",
+      "input": "〃5″",
+      "expectedMatchKey": "〃5′′"
+    },
+    {
+      "name": "double em dash —— collapses to one -",
+      "input": "台北——高雄",
+      "expectedMatchKey": "台北-高雄"
+    },
+    {
+      "name": "single em dash —",
+      "input": "台北—高雄",
+      "expectedMatchKey": "台北-高雄"
+    },
+    {
+      "name": "two-em dash ⸺ and three-em dash ⸻ (single characters used for ——)",
+      "input": "甲⸺乙⸻丙",
+      "expectedMatchKey": "甲-乙-丙"
+    },
+    {
+      "name": "two-em dash next to em dashes collapses to one -",
+      "input": "a⸺——b",
+      "expectedMatchKey": "a-b"
+    },
+    {
+      "name": "en dash –",
+      "input": "台北–高雄",
+      "expectedMatchKey": "台北-高雄"
+    },
+    {
+      "name": "horizontal bar, hyphen, non-breaking hyphen, figure dash, minus sign",
+      "input": "a―b‐c‑d‒e−f",
+      "expectedMatchKey": "a-b-c-d-e-f"
+    },
+    {
+      "name": "full-width hyphen-minus and small em dash via NFKC",
+      "input": "a－b﹘c",
+      "expectedMatchKey": "a-b-c"
+    },
+    {
+      "name": "ASCII hyphen inside token kept",
+      "input": "COVID-19",
+      "expectedMatchKey": "COVID-19"
+    },
+    {
+      "name": "katakana prolonged sound mark ー is NOT a dash",
+      "input": "コーヒー",
+      "expectedMatchKey": "コーヒー"
+    },
+    {
+      "name": "half-width katakana ｺｰﾋｰ → full-width via NFKC",
+      "input": "ｺｰﾋｰ",
+      "expectedMatchKey": "コーヒー"
+    },
+    {
+      "name": "CJK 一 is NOT a dash",
+      "input": "一一",
+      "expectedMatchKey": "一一"
+    },
+    {
+      "name": "single ellipsis …",
+      "input": "然後…",
+      "expectedMatchKey": "然後…"
+    },
+    {
+      "name": "Chinese double ellipsis ……",
+      "input": "然後……",
+      "expectedMatchKey": "然後…"
+    },
+    {
+      "name": "three ASCII dots",
+      "input": "然後...",
+      "expectedMatchKey": "然後…"
+    },
+    {
+      "name": "six ASCII dots",
+      "input": "然後......",
+      "expectedMatchKey": "然後…"
+    },
+    {
+      "name": "midline ellipsis ⋯⋯",
+      "input": "然後⋯⋯",
+      "expectedMatchKey": "然後…"
+    },
+    {
+      "name": "two dots not an ellipsis",
+      "input": "a..b",
+      "expectedMatchKey": "a..b"
+    },
+    {
+      "name": "repeated ideographic full stop not mapped",
+      "input": "嗯。。。",
+      "expectedMatchKey": "嗯。。。"
+    },
+    {
+      "name": "zero-width space removed",
+      "input": "台\u200B灣",
+      "expectedMatchKey": "台灣"
+    },
+    {
+      "name": "BOM / ZWNBSP removed",
+      "input": "\uFEFF台灣\uFEFF",
+      "expectedMatchKey": "台灣"
+    },
+    {
+      "name": "soft hyphen removed",
+      "input": "infor\u00ADmation",
+      "expectedMatchKey": "information"
+    },
+    {
+      "name": "ZWJ / ZWNJ / LRM / RLM removed",
+      "input": "a\u200Db\u200Cc\u200Ed\u200Fe",
+      "expectedMatchKey": "abcde"
+    },
+    {
+      "name": "variation selector-16 removed from emoji",
+      "input": "❤\uFE0F",
+      "expectedMatchKey": "❤"
+    },
+    {
+      "name": "ideographic variation selector removed (葛 + U+E0100)",
+      "input": "葛\uDB40\uDD00城",
+      "expectedMatchKey": "葛城"
+    },
+    {
+      "name": "zero-width char between base and combining mark does not block composition",
+      "input": "e\u200B\u0301",
+      "expectedMatchKey": "é"
+    },
+    {
+      "name": "CJK extension B kept as one code point",
+      "input": "𠀋土",
+      "expectedMatchKey": "𠀋土"
+    },
+    {
+      "name": "emoji kept",
+      "input": "讚😀 👍",
+      "expectedMatchKey": "讚😀👍"
+    },
+    {
+      "name": "NFKC half-width katakana ｱ",
+      "input": "ｱ",
+      "expectedMatchKey": "ア"
+    },
+    {
+      "name": "NFKC circled digit ①",
+      "input": "①②",
+      "expectedMatchKey": "12"
+    },
+    {
+      "name": "NFKC full-width latin",
+      "input": "ＡＢＣａｂｃ",
+      "expectedMatchKey": "ABCabc"
+    },
+    {
+      "name": "NFKC CJK compatibility ideograph U+F900 → 豈",
+      "input": "豈",
+      "expectedMatchKey": "豈"
+    },
+    {
+      "name": "NFKC ㈱ expands",
+      "input": "㈱",
+      "expectedMatchKey": "(株)"
+    },
+    {
+      "name": "mixed whitespace: space, tab, NBSP, ideographic space, thin space, NNBSP",
+      "input": " a\tb\u00A0c\u3000d\u2009e\u202Ff ",
+      "expectedMatchKey": "abcdef"
+    },
+    {
+      "name": "newlines removed inside a key",
+      "input": "a\nb\r\nc",
+      "expectedMatchKey": "abc"
+    },
+    {
+      "name": "only invisible characters → empty",
+      "input": "\u200B\uFEFF\u00AD \u3000",
+      "expectedMatchKey": ""
+    }
+  ],
+  "splitParagraphs": [
+    {
+      "name": "two long paragraphs, blank lines and trailing spaces dropped",
+      "body": "  行政院今天召開記者會說明明年度總預算的編列方向。  \n\n\n立法院預計下週開始審查各部會的預算案內容。\n",
+      "expectedParagraphs": [
+        "行政院今天召開記者會說明明年度總預算的編列方向。",
+        "立法院預計下週開始審查各部會的預算案內容。"
+      ]
+    },
+    {
+      "name": "short dateline merged into the next paragraph",
+      "body": "（中央社記者王小明台北5日電）\n行政院今天召開記者會說明明年度總預算的編列方向。",
+      "expectedParagraphs": [
+        "（中央社記者王小明台北5日電）\n行政院今天召開記者會說明明年度總預算的編列方向。"
+      ]
+    },
+    {
+      "name": "several short lines accumulate until 20 code points",
+      "body": "第一行短\n第二行短\n第三行短\n第四行短\n第五行短一點點",
+      "expectedParagraphs": [
+        "第一行短\n第二行短\n第三行短\n第四行短\n第五行短一點點"
+      ]
+    },
+    {
+      "name": "vertical tab and form feed are line breaks",
+      "body": "行政院今天召開記者會說明明年度總預算的編列方向。\u000B立法院預計下週開始審查各部會的預算案內容。\u000C監察院今天也公布了年度的調查報告與統計資料。",
+      "expectedParagraphs": [
+        "行政院今天召開記者會說明明年度總預算的編列方向。",
+        "立法院預計下週開始審查各部會的預算案內容。",
+        "監察院今天也公布了年度的調查報告與統計資料。"
+      ]
+    },
+    {
+      "name": "short trailing line merged into previous",
+      "body": "行政院今天召開記者會說明明年度總預算的編列方向。\n（編輯：李大華）",
+      "expectedParagraphs": [
+        "行政院今天召開記者會說明明年度總預算的編列方向。\n（編輯：李大華）"
+      ]
+    },
+    {
+      "name": "single short body stays one paragraph",
+      "body": "很短",
+      "expectedParagraphs": [
+        "很短"
+      ]
+    },
+    {
+      "name": "zero-width-only lines dropped; CRLF and U+2029 are line breaks",
+      "body": "行政院今天召開記者會說明明年度總預算的編列方向。\r\n\u200B\uFEFF\r\n立法院預計下週開始審查各部會的預算案內容。\u2029監察院也表示將持續關注預算執行的狀況與成效。",
+      "expectedParagraphs": [
+        "行政院今天召開記者會說明明年度總預算的編列方向。",
+        "立法院預計下週開始審查各部會的預算案內容。",
+        "監察院也表示將持續關注預算執行的狀況與成效。"
+      ]
+    },
+    {
+      "name": "length threshold counts code points of the key, not UTF-16 units (10 ext-B chars = 20 UTF-16 units but 10 code points)",
+      "body": "𠀋𠀋𠀋𠀋𠀋𠀋𠀋𠀋𠀋𠀋\n行政院今天召開記者會說明明年度總預算的編列方向。",
+      "expectedParagraphs": [
+        "𠀋𠀋𠀋𠀋𠀋𠀋𠀋𠀋𠀋𠀋\n行政院今天召開記者會說明明年度總預算的編列方向。"
+      ]
+    },
+    {
+      "name": "threshold counts the key, so spaces and zero-width chars do not make a line long enough",
+      "body": "短 句 \u200B 加 很 多 空 白 與 零 寬 字 元 \u200B\n行政院今天召開記者會說明明年度總預算的編列方向。",
+      "expectedParagraphs": [
+        "短 句 \u200B 加 很 多 空 白 與 零 寬 字 元 \u200B\n行政院今天召開記者會說明明年度總預算的編列方向。"
+      ]
+    },
+    {
+      "name": "exactly 20 key code points is long enough",
+      "body": "一二三四五六七八九十一二三四五六七八九十\n行政院今天召開記者會說明明年度總預算的編列方向。",
+      "expectedParagraphs": [
+        "一二三四五六七八九十一二三四五六七八九十",
+        "行政院今天召開記者會說明明年度總預算的編列方向。"
+      ]
+    },
+    {
+      "name": "empty body",
+      "body": "\n \n\u3000\n",
+      "expectedParagraphs": []
+    }
+  ],
+  "paragraphIdEquivalence": [
+    {
+      "name": "two fetches of the same paragraph with different punctuation/whitespace forms get one ID",
+      "variants": [
+        "他說「這項政策——不會改變」……",
+        "他說“這項政策—不會改變”...",
+        "他說 『這項政策–不會改變』 …",
+        "他\u200B說「這項政策——不會改變」⋯⋯"
+      ]
+    }
+  ]
+}

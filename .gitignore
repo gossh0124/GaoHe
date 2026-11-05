@@ -14,3 +14,4 @@ snapshots/
 reports/
 *.sqlite
 *.sqlite3
+probe/skill/gaohe-probe.zip

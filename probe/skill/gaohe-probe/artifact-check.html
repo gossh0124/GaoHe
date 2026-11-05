@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GaoHe 連外測試</title>
+<style>
+  :root { --fg:#1a1a1a; --bg:#ffffff; --ok:#1b7f3b; --bad:#b42318; --muted:#666; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#ececec; --bg:#1c1c1c; --ok:#5fd38a; --bad:#ff8a80; --muted:#aaa; } }
+  body { font-family: system-ui, sans-serif; color: var(--fg); background: var(--bg); margin: 0; padding: 16px; }
+  h1 { font-size: 1.1rem; margin: 0 0 12px; }
+  .ok { color: var(--ok); font-weight: 600; } .bad { color: var(--bad); font-weight: 600; }
+  code, pre { font-size: .85rem; white-space: pre-wrap; word-break: break-all; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>GaoHe artifact 連外測試</h1>
+<p>目標：<code id="target"></code></p>
+<p>fetch() 結果：<span id="fetch">測試中…</span></p>
+<pre id="detail"></pre>
+<p>window.claude：<code id="api"></code></p>
+<script>
+  const ORIGIN = '__PROBE_ORIGIN__';
+  const url = ORIGIN.replace(/\/+$/, '') + '/.well-known/oauth-protected-resource/mcp';
+  document.getElementById('target').textContent = url;
+  const out = document.getElementById('fetch');
+  const detail = document.getElementById('detail');
+  try {
+    const c = window.claude;
+    document.getElementById('api').textContent =
+      c ? 'present: ' + Object.keys(c).join(', ') : 'not present';
+  } catch (e) {
+    document.getElementById('api').textContent = 'error: ' + e;
+  }
+  (async () => {
+    try {
+      const res = await fetch(url, { method: 'GET', mode: 'cors', cache: 'no-store' });
+      const text = await res.text();
+      out.textContent = '成功（HTTP ' + res.status + '）';
+      out.className = 'ok';
+      detail.textContent = text.slice(0, 300);
+    } catch (e) {
+      out.textContent = '失敗';
+      out.className = 'bad';
+      detail.textContent = String(e && e.message ? e.message : e);
+    }
+  })();
+</script>
+</body>
+</html>

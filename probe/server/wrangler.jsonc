@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gaohe-probe",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // nodejs_compat: the agents MCP handler imports node:async_hooks (AsyncLocalStorage for getMcpAuthContext).
+  // global_fetch_strictly_public: required by workers-oauth-provider to enable CIMD
+  // (Client ID Metadata Document) client lookups.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "observability": { "enabled": true },
+  // Daily 90-day retention purge of ip_observations (spec §11; src/retention.ts).
+  "triggers": { "crons": ["17 3 * * *"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "gaohe-probe",
+      // Replace with the id printed by `npx wrangler d1 create gaohe-probe` (RUNBOOK step 4).
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      // Required binding name for @cloudflare/workers-oauth-provider.
+      "binding": "OAUTH_KV",
+      // Replace with the id printed by `npx wrangler kv namespace create OAUTH_KV` (RUNBOOK step 4).
+      "id": "00000000000000000000000000000000"
+    }
+  ]
+  // No "vars". Secrets (set with `npx wrangler secret put <NAME>`; for local dev put them in .dev.vars):
+  //   GITHUB_CLIENT_ID      GitHub OAuth App client id
+  //   GITHUB_CLIENT_SECRET  GitHub OAuth App client secret
+  //   IP_HMAC_KEY           ≥32 bytes (required; refused otherwise), key for HMAC of OAuth/MCP IP prefixes (spec §9.4)
+  //   REPORT_TOKEN          ≥32 random bytes, bearer token for GET /probe/report
+  //   PROBE_ALLOWED_GITHUB_IDS  comma-separated GitHub numeric user ids allowed to sign in (P0 allowlist;
+  //                             empty = nobody)
+}

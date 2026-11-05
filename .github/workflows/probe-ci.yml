@@ -1,0 +1,43 @@
+name: Probe CI
+
+on:
+  push:
+    paths:
+      - "probe/**"
+      - "schemas/**"
+      - ".github/workflows/probe-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "probe/**"
+      - "schemas/**"
+      - ".github/workflows/probe-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe-server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: probe/server
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: probe/server/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit and workerd integration tests
+        run: npm test
+      - name: Local wrangler smoke test
+        run: npm run smoke
+        env:
+          PORT: "8787"

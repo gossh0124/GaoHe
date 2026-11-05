@@ -1,0 +1,19 @@
+# GaoHe P0 實測網址清單：一行一個網址；# 開頭為註解，空行忽略。
+# 請把下方 example.invalid 佔位行換成實際文章網址（約 10 篇，建議每家媒體 1 篇、
+# 選當週的一般新聞，避免直播頁、影音頁、懶人包）。三次執行與兩個帳號都必須用同一份清單。
+#
+# 連接器網域（不含 /mcp），artifact 連外測試會用到：
+# probe-origin: https://gaohe-probe.YOUR-SUBDOMAIN.workers.dev
+#
+# 建議涵蓋的台灣媒體（只列名稱，請自行挑選文章網址）：
+#   中央社、公視、聯合新聞網、自由時報、中時新聞網、報導者、ETtoday、鏡週刊、天下、風傳媒
+https://example.invalid/replace-me-01
+https://example.invalid/replace-me-02
+https://example.invalid/replace-me-03
+https://example.invalid/replace-me-04
+https://example.invalid/replace-me-05
+https://example.invalid/replace-me-06
+https://example.invalid/replace-me-07
+https://example.invalid/replace-me-08
+https://example.invalid/replace-me-09
+https://example.invalid/replace-me-10
